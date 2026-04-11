@@ -46,15 +46,10 @@ python QuickNoteBoard.py
 
 On first launch a `notebooks/` folder is created with a default notebook. User preferences are stored in `config.json`, and periodic snapshots are written to `backups/`.
 
-### Utilities
-
-- `unpack.py` — helper script for unpacking notebook archives.
-
 ## Project layout
 
 ```
 QuickNoteBoard.py   # main application
-unpack.py           # archive utility
 config.json         # user settings (auto-generated)
 notebooks/          # your notebooks (auto-generated)
 backups/            # automatic backups (auto-generated)
