@@ -22,7 +22,7 @@ A lightweight, cross-platform desktop note-taking app built with Python and Tkin
 ## Installation
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/StellarStar255/stellar_quick_noteboard
 cd stellar_quick_noteboard
 pip install Pillow
 ```
