@@ -181,6 +181,8 @@ _I18N = {
     "nb_exists":        ("笔记本已存在", "Notebook already exists"),
     "confirm_del_msg":  ("确定要删除笔记本 '{}' 吗？\n这将删除所有笔记和附件！",
                          "Delete notebook '{}'?\nAll notes and attachments will be lost!"),
+    "quit_confirm_title": ("退出确认", "Confirm Quit"),
+    "quit_confirm_msg":   ("确定要退出 Quick Note Board 吗？", "Quit Quick Note Board?"),
     # Language toggle button
     "lang_toggle":      ("EN", "中"),
 }
@@ -682,6 +684,19 @@ class NoteApp:
 
         # 绑定关闭事件以保存笔记
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+        # Cmd+Q 二次确认（避免误触退出，丢失未保存内容）
+        if platform.system() == "Darwin":
+            try:
+                # 拦截系统级 Quit（Apple 菜单 → Quit、以及大多数 Cmd+Q 路径）
+                self.root.createcommand("::tk::mac::Quit", self._confirm_quit)
+            except Exception:
+                pass
+        # 直接绑定 Cmd+Q / Ctrl+Q 作为兜底
+        self.root.bind_all("<Command-q>", self._confirm_quit)
+        self.root.bind_all("<Command-Q>", self._confirm_quit)
+        self.root.bind_all("<Control-q>", self._confirm_quit)
+        self.root.bind_all("<Control-Q>", self._confirm_quit)
 
     def toggle_topmost(self):
         is_top = self.always_on_top.get()
@@ -3230,6 +3245,27 @@ class NoteApp:
         if content.endswith("\n"):
             content = content[:-1]
         return content
+
+    def _confirm_quit(self, event=None):
+        """Ask the user to confirm before quitting (Cmd+Q on macOS).
+
+        Cmd+Q sits next to common shortcuts like Cmd+W/Cmd+A and is easy to
+        hit by accident, so we always require an explicit confirmation here.
+        """
+        import tkinter.messagebox as messagebox
+        try:
+            self.root.lift()
+            self.root.focus_force()
+        except Exception:
+            pass
+        if messagebox.askyesno(
+            self.tr("quit_confirm_title"),
+            self.tr("quit_confirm_msg"),
+            parent=self.root,
+            default="no",
+        ):
+            self.on_closing()
+        return "break"
 
     def on_closing(self):
         for viewer in list(self._notebook_viewers):
