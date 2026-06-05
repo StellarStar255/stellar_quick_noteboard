@@ -559,12 +559,10 @@ class NoteApp:
         list_frame = tk.Frame(self.sidebar_frame, bg=t["bg"])
         list_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=(0, 5))
 
-        self.notebook_listbox = tk.Listbox(
-            list_frame, selectmode=tk.SINGLE, font=(SYSTEM_FONT, self.ui_font_size),
-            bg=t["list_bg"], fg=t["list_fg"],
-            selectbackground=t["list_select_bg"], selectforeground=t["list_select_fg"],
-            highlightthickness=0, relief=tk.FLAT, activestyle="none",
-            borderwidth=0)
+        self.notebook_listbox = ttk.Treeview(
+            list_frame, show="tree", selectmode="browse",
+            style="Sidebar.Treeview")
+        self.notebook_listbox.column("#0", width=120, stretch=True)
         notebook_scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL,
                                             command=self.notebook_listbox.yview,
                                             style="Visible.Vertical.TScrollbar")
@@ -573,12 +571,12 @@ class NoteApp:
         notebook_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.notebook_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.notebook_listbox.bind("<<ListboxSelect>>", self.on_notebook_listbox_select)
+        self.notebook_listbox.bind("<<TreeviewSelect>>", self.on_notebook_listbox_select)
         self.notebook_listbox.bind("<Double-Button-1>", self.on_notebook_listbox_double_click)
         self.notebook_listbox.bind("<Button-2>", self.on_notebook_listbox_right_click)  # macOS
         self.notebook_listbox.bind("<Button-3>", self.on_notebook_listbox_right_click)  # Windows/Linux
         # Drag-and-drop reordering
-        self._drag_start_index = None
+        self._drag_start_iid = None
         self._drag_active = False
         self.notebook_listbox.bind("<Button-1>", self._on_listbox_drag_start)
         self.notebook_listbox.bind("<B1-Motion>", self._on_listbox_drag_motion)
@@ -772,6 +770,19 @@ class NoteApp:
         s.map("Sidebar.TButton",
               background=[("active", t["button_hover"]), ("pressed", t["button_active"])])
 
+        # ── Sidebar Treeview (notebook list) ──
+        # rowheight gives each entry vertical breathing room (Listbox can't)
+        row_h = max(int(uf * 2.0), uf + 12)
+        s.configure("Sidebar.Treeview",
+                     background=t["list_bg"], fieldbackground=t["list_bg"],
+                     foreground=t["list_fg"], borderwidth=0, relief="flat",
+                     rowheight=row_h, indent=10, font=(SYSTEM_FONT, uf))
+        s.map("Sidebar.Treeview",
+              background=[("selected", t["list_select_bg"])],
+              foreground=[("selected", t["list_select_fg"])])
+        # Drop the default border element so the tree blends into the sidebar
+        s.layout("Sidebar.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+
     def apply_theme(self, theme_name):
         """Apply a theme by name, updating all widgets."""
         self.current_theme = theme_name
@@ -791,12 +802,8 @@ class NoteApp:
         # Sidebar
         if hasattr(self, 'sidebar_frame'):
             self._theme_frame_children(self.sidebar_frame, t["bg"])
-        if hasattr(self, 'notebook_listbox'):
-            self.notebook_listbox.configure(
-                bg=t["list_bg"], fg=t["list_fg"],
-                selectbackground=t["list_select_bg"], selectforeground=t["list_select_fg"],
-                highlightthickness=0, relief=tk.FLAT, activestyle="none",
-                font=(SYSTEM_FONT, self.ui_font_size))
+        # Notebook list colors/rowheight are driven by the "Sidebar.Treeview"
+        # ttk style, already refreshed via setup_ttk_styles() above.
 
         # Main paned window
         if hasattr(self, 'main_paned'):
@@ -1458,8 +1465,9 @@ class NoteApp:
         dialog.geometry(f"+{x}+{y}")
 
     def refresh_notebook_listbox(self, search_text=""):
-        """Refresh the notebook listbox with optional search filter"""
-        self.notebook_listbox.delete(0, tk.END)
+        """Refresh the notebook list with optional search filter"""
+        tree = self.notebook_listbox
+        tree.delete(*tree.get_children())
         notebooks = self.get_notebooks_list()
 
         # Filter by search text
@@ -1467,24 +1475,21 @@ class NoteApp:
             search_lower = search_text.lower()
             notebooks = [n for n in notebooks if search_lower in n.lower()]
 
-        # Add notebooks to listbox with shortcut indicator
+        # Add notebooks with shortcut indicator (iid = actual notebook name)
         for name in notebooks:
             display_name = f"★ {name}" if name in self.notebook_shortcuts else name
-            self.notebook_listbox.insert(tk.END, display_name)
+            tree.insert("", tk.END, iid=name, text=display_name)
 
         # Highlight current notebook
         self.highlight_current_notebook()
 
     def highlight_current_notebook(self):
-        """Highlight the current notebook in the listbox"""
-        for i in range(self.notebook_listbox.size()):
-            display_name = self.notebook_listbox.get(i)
-            actual_name = self.get_actual_notebook_name(display_name)
-            if actual_name == self.current_notebook:
-                self.notebook_listbox.selection_clear(0, tk.END)
-                self.notebook_listbox.selection_set(i)
-                self.notebook_listbox.see(i)
-                break
+        """Highlight the current notebook in the list"""
+        tree = self.notebook_listbox
+        if self.current_notebook and self.current_notebook in tree.get_children():
+            tree.selection_set(self.current_notebook)
+            tree.focus(self.current_notebook)
+            tree.see(self.current_notebook)
 
     def get_actual_notebook_name(self, display_name):
         """Get actual notebook name from display name (remove ★ prefix if present)"""
@@ -1498,96 +1503,80 @@ class NoteApp:
         self.refresh_notebook_listbox(search_text)
 
     def on_notebook_listbox_select(self, event):
-        """Handle single click on notebook listbox"""
+        """Handle selection change in the notebook list"""
         if getattr(self, '_drag_active', False):
             return
-        selection = self.notebook_listbox.curselection()
+        selection = self.notebook_listbox.selection()
         if selection:
-            display_name = self.notebook_listbox.get(selection[0])
-            actual_name = self.get_actual_notebook_name(display_name)
+            actual_name = selection[0]  # iid is the actual notebook name
             if actual_name != self.current_notebook:
                 self.switch_notebook(actual_name)
 
     def on_notebook_listbox_double_click(self, event):
-        """Handle double click on notebook listbox - show context menu"""
-        selection = self.notebook_listbox.curselection()
+        """Handle double click on notebook list - show context menu"""
+        selection = self.notebook_listbox.selection()
         if selection:
-            display_name = self.notebook_listbox.get(selection[0])
-            actual_name = self.get_actual_notebook_name(display_name)
-            self.show_notebook_context_menu(event, actual_name)
+            self.show_notebook_context_menu(event, selection[0])
 
     def on_notebook_listbox_right_click(self, event):
-        """Handle right click on notebook listbox - show context menu"""
+        """Handle right click on notebook list - show context menu"""
         # Select the item under cursor
-        index = self.notebook_listbox.nearest(event.y)
-        if index >= 0:
-            self.notebook_listbox.selection_clear(0, tk.END)
-            self.notebook_listbox.selection_set(index)
-            display_name = self.notebook_listbox.get(index)
-            actual_name = self.get_actual_notebook_name(display_name)
-            self.show_notebook_context_menu(event, actual_name)
+        iid = self.notebook_listbox.identify_row(event.y)
+        if iid:
+            self.notebook_listbox.selection_set(iid)
+            self.show_notebook_context_menu(event, iid)
 
     def _on_listbox_drag_start(self, event):
-        """Record the index where the drag starts."""
-        self._drag_start_index = self.notebook_listbox.nearest(event.y)
+        """Record the item where the drag starts."""
+        self._drag_start_iid = self.notebook_listbox.identify_row(event.y)
         self._drag_active = False
         self._drag_out_of_bounds = False
 
     def _on_listbox_drag_motion(self, event):
         """Move the dragged item as the mouse moves."""
-        if self._drag_start_index is None:
+        if not getattr(self, '_drag_start_iid', None):
             return
-        lb = self.notebook_listbox
-        w, h = lb.winfo_width(), lb.winfo_height()
-        # Detect drag outside listbox bounds
+        tree = self.notebook_listbox
+        w, h = tree.winfo_width(), tree.winfo_height()
+        # Detect drag outside list bounds
         if event.x < -20 or event.x > w + 20 or event.y < -20 or event.y > h + 20:
             self._drag_out_of_bounds = True
-            lb.config(cursor="plus")
+            tree.config(cursor="plus")
             return
         else:
             self._drag_out_of_bounds = False
-            lb.config(cursor="")
+            tree.config(cursor="")
 
-        cur = lb.nearest(event.y)
-        if cur < 0 or cur == self._drag_start_index:
-            if not self._drag_active and cur != self._drag_start_index:
+        target = tree.identify_row(event.y)
+        if not target or target == self._drag_start_iid:
+            if not self._drag_active and target and target != self._drag_start_iid:
                 self._drag_active = True
             return
         self._drag_active = True
-        # Swap items in the listbox visually
-        item = lb.get(self._drag_start_index)
-        lb.delete(self._drag_start_index)
-        lb.insert(cur, item)
-        lb.selection_clear(0, tk.END)
-        lb.selection_set(cur)
-        self._drag_start_index = cur
+        # Move the dragged item to the target position
+        tree.move(self._drag_start_iid, "", tree.index(target))
+        tree.selection_set(self._drag_start_iid)
 
     def _on_listbox_drag_end(self, event):
         """Finalize the drag: persist reorder or open floating viewer."""
         self.notebook_listbox.config(cursor="")
         if getattr(self, '_drag_out_of_bounds', False):
-            # Dragged outside listbox -> open floating viewer
-            if self._drag_start_index is not None:
-                display_name = self.notebook_listbox.get(self._drag_start_index)
-                notebook_name = self.get_actual_notebook_name(display_name)
-                self._open_notebook_viewer(notebook_name)
-            self._drag_start_index = None
+            # Dragged outside list -> open floating viewer
+            if getattr(self, '_drag_start_iid', None):
+                self._open_notebook_viewer(self._drag_start_iid)
+            self._drag_start_iid = None
             self._drag_active = False
             self._drag_out_of_bounds = False
             self.refresh_notebook_listbox(self.notebook_search_var.get())
             return
 
         if self._drag_active:
-            # Rebuild notebook_order from the current listbox order
-            new_order = []
-            for i in range(self.notebook_listbox.size()):
-                display = self.notebook_listbox.get(i)
-                new_order.append(self.get_actual_notebook_name(display))
-            self.notebook_order = new_order
+            # Rebuild notebook_order from the current list order (iids = names)
+            self.notebook_order = list(self.notebook_listbox.get_children())
             self.save_notebook_order()
             self.update_notebook_menu()
             self.highlight_current_notebook()
-        self._drag_start_index = None
+        self._drag_start_iid = None
         self._drag_active = False
 
     def _viewer_ctx(self, viewer):
