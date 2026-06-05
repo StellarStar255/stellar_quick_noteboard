@@ -473,9 +473,9 @@ class NoteApp:
         # 笔记本当前选中状态（侧边栏列表负责切换；不再显示顶部下拉框）
         self.notebook_var = tk.StringVar(value=self.current_notebook)
 
-        # 右侧按钮组
+        # 功能按钮组（移到左侧，紧跟侧边栏开关之后）
         font_btn_frame = tk.Frame(self.top_frame)
-        font_btn_frame.pack(side=tk.RIGHT)
+        font_btn_frame.pack(side=tk.LEFT, padx=(12, 0))
 
         # Theme toggle button (rightmost)
         self.theme_toggle_btn = ttk.Button(
