@@ -535,8 +535,9 @@ class NoteApp:
 
         # --- 主内容区域：左侧侧边栏 + 右侧内容 ---
         t = self.current_theme_colors
-        self.main_paned = tk.PanedWindow(root, orient=tk.HORIZONTAL, sashwidth=4,
-                                          sashrelief=tk.FLAT, bg=t["paned_sash"])
+        self.main_paned = tk.PanedWindow(root, orient=tk.HORIZONTAL, sashwidth=8,
+                                          sashrelief=tk.RAISED, sashpad=0,
+                                          opaqueresize=True, bg=t["paned_sash"])
         self.main_paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         # === 左侧侧边栏：笔记本列表 ===
@@ -799,7 +800,7 @@ class NoteApp:
 
         # Main paned window
         if hasattr(self, 'main_paned'):
-            self.main_paned.configure(bg=t["bg"], sashrelief=tk.FLAT)
+            self.main_paned.configure(bg=t["paned_sash"], sashrelief=tk.RAISED)
 
         # Text area
         if hasattr(self, 'text_area'):
