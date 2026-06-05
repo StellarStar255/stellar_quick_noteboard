@@ -3065,6 +3065,25 @@ class NoteApp:
             # Build content with image markers
             content = self.get_content_with_markers()
             note_path = self.get_note_file_path()
+
+            # ── Data-loss guard ──────────────────────────────────────────
+            # Never overwrite a note that has real content on disk with an
+            # empty/whitespace editor. A transient blank editor (during a
+            # notebook switch, a failed reload, or a stray clear) must not be
+            # allowed to zero the file. Leave the on-disk content untouched.
+            if not content.strip():
+                try:
+                    if os.path.exists(note_path) and os.path.getsize(note_path) > 0:
+                        with open(note_path, "r", encoding="utf-8") as f:
+                            existing = f.read()
+                        if existing.strip():
+                            print(f"save_notes: refused to overwrite non-empty "
+                                  f"note '{self.current_notebook}' with empty "
+                                  f"content (skipped to prevent data loss).")
+                            return
+                except Exception as e:
+                    print(f"save_notes empty-guard error: {e}")
+
             with open(note_path, "w", encoding="utf-8") as f:
                 f.write(content)
 
