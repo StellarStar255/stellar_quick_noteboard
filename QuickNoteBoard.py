@@ -96,6 +96,7 @@ _I18N = {
     "notebook_btn":     ("笔记本", "Notebook"),
     "icon_btn":         ("图标", "Icon"),
     "ui_size_btn":      ("UI字号", "UI Font"),
+    "ui_font_auto":     ("自动适配屏幕", "Auto (fit screen)"),
     "padding_btn":      ("左边距", "Padding"),
     # Sidebar
     "new_btn":          ("+ 新建", "+ New"),
@@ -378,7 +379,8 @@ class NoteApp:
 
         # UI font size (toolbar, sidebar, dialogs)
         self.ui_font_sizes = [11, 12, 13, 14, 15, 16, 18, 20]
-        self.ui_font_size = 13  # default UI font size
+        # Auto-pick a comfortable default from the screen size (config may override)
+        self.ui_font_size = self._auto_ui_font_size()
 
         # Text area padding
         self.padding_sizes = [0, 5, 10, 15, 20, 30, 40]
@@ -1164,6 +1166,11 @@ class NoteApp:
     def show_ui_font_menu(self):
         """Show menu to select UI font size"""
         menu = self.make_styled_menu()
+        auto_size = self._auto_ui_font_size()
+        auto_label = self.tr("ui_font_auto") if hasattr(self, "tr") else "Auto (fit screen)"
+        menu.add_command(label=f"   {auto_label} · {auto_size}px",
+                         command=lambda s=auto_size: self.set_ui_font_size(s))
+        menu.add_separator()
         for size in self.ui_font_sizes:
             label = f"{'✓ ' if size == self.ui_font_size else '   '}{size}px"
             menu.add_command(label=label, command=lambda s=size: self.set_ui_font_size(s))
@@ -1171,6 +1178,28 @@ class NoteApp:
             menu.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
         finally:
             menu.grab_release()
+
+    def _auto_ui_font_size(self):
+        """Pick a comfortable UI font size based on the screen resolution."""
+        try:
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+        except Exception:
+            return 13
+        # Larger / higher-resolution screens comfortably fit a bigger UI font.
+        diag = (sw ** 2 + sh ** 2) ** 0.5
+        if diag >= 4000:        # ~3840x2160 (4K) and up
+            target = 16
+        elif diag >= 2900:      # ~2560x1440
+            target = 15
+        elif diag >= 2200:      # ~1920x1080
+            target = 14
+        elif diag >= 1700:      # ~1440x900 / 1366x768
+            target = 13
+        else:
+            target = 12
+        # Snap to the nearest available size
+        return min(self.ui_font_sizes, key=lambda s: abs(s - target))
 
     def set_ui_font_size(self, size):
         """Set new UI font size and refresh all UI elements"""
@@ -2733,8 +2762,8 @@ class NoteApp:
                     # 加载图标大小
                     self.icon_font_size = config.get("icon_size", 24)
 
-                    # 加载UI字号
-                    self.ui_font_size = config.get("ui_font_size", 13)
+                    # 加载UI字号（未保存过则保留自动检测的合适大小）
+                    self.ui_font_size = config.get("ui_font_size", self.ui_font_size)
 
                     # 加载文本边距
                     self.text_padding = config.get("text_padding", 10)
