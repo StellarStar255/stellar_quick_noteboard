@@ -4984,6 +4984,9 @@ class NoteApp:
         self.outline_text.configure(state=tk.NORMAL)
         self.outline_text.delete("1.0", tk.END)
         self._outline_active_line = 0
+        # Outline rebuilt — invalidate the active-index cache so the arrow is
+        # re-drawn (see _highlight_outline_for_line's same-index fast path).
+        self._outline_last_active_idx = None
         t = self.THEMES[self.current_theme]
         indent = {1: "", 2: "  ", 3: "    "}
         # Estimate max chars that fit in panel (account for padding, drag handle)
@@ -5114,9 +5117,32 @@ class NoteApp:
         self._highlight_outline_for_line(cursor_line)
 
     def _update_outline_from_scroll(self):
-        """Update outline highlight based on a line slightly below the top of the viewport."""
+        """Update outline highlight from scroll position (throttled).
+
+        The scrollbar callback fires on every scroll tick; during a fast scroll
+        or an auto-scrolling selection-drag that means dozens of calls/sec, each
+        doing several edits + see() on the outline. Throttle to ~60ms with a
+        trailing update so the outline stays in sync without stuttering the drag.
+        """
         if not self._outline_visible or not self._outline_headings:
             return
+        import time
+        now = time.time() * 1000
+        last = getattr(self, '_outline_scroll_last', 0)
+        if now - last < 60:
+            # Coalesce: ensure one trailing sync after the scroll burst settles
+            if getattr(self, '_outline_scroll_pending', None) is None:
+                self._outline_scroll_pending = self.root.after(
+                    70, self._do_outline_scroll_sync)
+            return
+        self._do_outline_scroll_sync()
+
+    def _do_outline_scroll_sync(self):
+        self._outline_scroll_pending = None
+        if not self._outline_visible or not self._outline_headings:
+            return
+        import time
+        self._outline_scroll_last = time.time() * 1000
         try:
             # Use a point ~1/4 down the viewport so the outline highlights
             # the heading a bit earlier, before it scrolls off the top.
@@ -5134,6 +5160,12 @@ class NoteApp:
                 active_idx = i
             else:
                 break
+
+        # Nothing to do if the active heading hasn't changed — avoids the
+        # ~2ms of edits+see() on every scroll tick within the same section.
+        if active_idx == getattr(self, '_outline_last_active_idx', None):
+            return
+        self._outline_last_active_idx = active_idx
 
         self.outline_text.configure(state=tk.NORMAL)
         self.outline_text.tag_remove("ol_active", "1.0", tk.END)
