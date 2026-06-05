@@ -3753,6 +3753,11 @@ class NoteApp:
         for color in self.HIGHLIGHT_NAMES:
             self.text_area.tag_configure(f"highlight_{color}", background=t[f"hl_{color}"],
                                          spacing1=0, spacing3=0)
+        # Selection renders above highlights to avoid flicker while selecting
+        try:
+            self.text_area.tag_raise("sel")
+        except Exception:
+            pass
 
         # Right-click context menu on text area
         self.text_area.bind("<Button-2>", self.show_text_context_menu)  # macOS
@@ -4481,6 +4486,14 @@ class NoteApp:
         for tag in ta.tag_names():
             if tag.startswith("md_"):
                 ta.tag_lower(tag)
+        # Selection must render ABOVE highlight_ backgrounds, otherwise dragging
+        # a selection across highlighted text makes the highlight color fight the
+        # selection color and the region appears to flicker while selecting.
+        # Order (low→high): md_* < highlight_* < sel < md_elide.
+        try:
+            ta.tag_raise("sel")
+        except Exception:
+            pass
         # md_elide must be the HIGHEST priority tag overall so elide always works
         # (highlight_ tags could otherwise override elide=True)
         ta.tag_raise("md_elide")
@@ -4612,6 +4625,11 @@ class NoteApp:
         # Always update outline highlight (even on same line clicks)
         if hasattr(self, 'outline_text') and self._outline_visible:
             self._update_outline_active()
+
+        # While a selection is active, don't show/hide markdown markers — toggling
+        # elide reflows the text and makes the selection flicker/jump as it grows.
+        if self.text_area.tag_ranges(tk.SEL):
+            return
 
         if line == self._md_active_line:
             return
