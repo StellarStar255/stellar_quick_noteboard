@@ -980,10 +980,13 @@ class NoteApp:
                                          overstrike=True, foreground=t["fg_dim"])
         except:
             pass
-        # Highlight colors
+        # Highlight colors. spacing1/spacing3=0 so the colored block hugs the
+        # text instead of extending into the inter-line spacing above/below.
         for color in self.HIGHLIGHT_NAMES:
             try:
-                self.text_area.tag_configure(f"highlight_{color}", background=t[f"hl_{color}"])
+                self.text_area.tag_configure(f"highlight_{color}",
+                                             background=t[f"hl_{color}"],
+                                             spacing1=0, spacing3=0)
             except:
                 pass
         # File link tags
@@ -3745,10 +3748,11 @@ class NoteApp:
             foreground=self.current_theme_colors["fg_dim"]
         )
 
-        # Configure highlight tags
+        # Configure highlight tags (spacing1/spacing3=0 so the block hugs text)
         t = self.current_theme_colors
         for color in self.HIGHLIGHT_NAMES:
-            self.text_area.tag_configure(f"highlight_{color}", background=t[f"hl_{color}"])
+            self.text_area.tag_configure(f"highlight_{color}", background=t[f"hl_{color}"],
+                                         spacing1=0, spacing3=0)
 
         # Right-click context menu on text area
         self.text_area.bind("<Button-2>", self.show_text_context_menu)  # macOS
