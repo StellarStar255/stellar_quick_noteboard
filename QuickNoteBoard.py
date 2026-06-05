@@ -505,8 +505,8 @@ class NoteApp:
         self._btn_padding = ttk.Button(font_btn_frame, text=self.tr("padding_btn"),
                    command=self.show_padding_menu, style="Toolbar.TButton", width=5)
         self._btn_padding.pack(side=tk.RIGHT, padx=1)
-        self._btn_ui_size = ttk.Button(font_btn_frame, text=self.tr("ui_size_btn"),
-                   command=self.show_ui_font_menu, style="Toolbar.TButton", width=5)
+        self._btn_ui_size = ttk.Button(font_btn_frame, text=self._ui_size_btn_label(),
+                   command=self.show_ui_font_menu, style="Toolbar.TButton", width=8)
         self._btn_ui_size.pack(side=tk.RIGHT, padx=1)
         self._btn_icon = ttk.Button(font_btn_frame, text=self.tr("icon_btn"),
                    command=self.show_icon_menu, style="Toolbar.TButton", width=4)
@@ -840,6 +840,10 @@ class NoteApp:
         if hasattr(self, 'theme_toggle_btn'):
             self.theme_toggle_btn.configure(text=t["theme_icon"])
 
+        # Keep the UI-font button label in sync with the actual current size
+        if hasattr(self, '_btn_ui_size'):
+            self._btn_ui_size.configure(text=self._ui_size_btn_label())
+
         # Search bar
         if hasattr(self, '_search_frame'):
             self._search_frame.configure(bg=t["bg_secondary"], highlightbackground=t["border"])
@@ -920,7 +924,7 @@ class NoteApp:
         self._btn_history.configure(text=self.tr("history_btn"))
         self._btn_notebook.configure(text=self.tr("notebook_btn"))
         self._btn_icon.configure(text=self.tr("icon_btn"))
-        self._btn_ui_size.configure(text=self.tr("ui_size_btn"))
+        self._btn_ui_size.configure(text=self._ui_size_btn_label())
         self._btn_padding.configure(text=self.tr("padding_btn"))
         self._btn_lang.configure(text=self.tr("lang_toggle"))
         # Sidebar
@@ -1201,11 +1205,18 @@ class NoteApp:
         # Snap to the nearest available size
         return min(self.ui_font_sizes, key=lambda s: abs(s - target))
 
+    def _ui_size_btn_label(self):
+        """Toolbar label for the UI-font button, always showing the actual size."""
+        return f"{self.tr('ui_size_btn')} {self.ui_font_size}"
+
     def set_ui_font_size(self, size):
         """Set new UI font size and refresh all UI elements"""
         self.ui_font_size = size
         # Re-apply theme to update all styles and widgets
         self.apply_theme(self.current_theme)
+        # Keep the toolbar button showing the actual current size
+        if hasattr(self, "_btn_ui_size"):
+            self._btn_ui_size.configure(text=self._ui_size_btn_label())
         self.save_config()
 
     def ensure_notebooks_dir(self):
