@@ -617,10 +617,12 @@ class NoteApp:
         self.text_container.pack(fill=tk.BOTH, expand=True, pady=5)
 
         # 文本区域 (Main Note Area) - 启用撤销功能
+        _sp1, _sp2, _sp3 = self._line_spacing(self.current_font_size)
         self.text_area = tk.Text(
             self.text_container, wrap=tk.WORD,
             font=(SYSTEM_FONT, self.current_font_size), undo=True,
             padx=self.text_padding,
+            spacing1=_sp1, spacing2=_sp2, spacing3=_sp3,
             bg=t["text_bg"], fg=t["text_fg"],
             insertbackground=t["text_insert"],
             selectbackground=t["text_select_bg"],
@@ -1115,8 +1117,16 @@ class NoteApp:
 
         history_window.protocol("WM_DELETE_WINDOW", on_history_close)
 
+    def _line_spacing(self, font_size):
+        """Comfortable (above, between-wrapped, below) line spacing for a font size."""
+        return (max(2, int(font_size * 0.30)),
+                max(2, int(font_size * 0.30)),
+                max(3, int(font_size * 0.55)))
+
     def update_font(self):
-        self.text_area.configure(font=(SYSTEM_FONT, self.current_font_size))
+        sp1, sp2, sp3 = self._line_spacing(self.current_font_size)
+        self.text_area.configure(font=(SYSTEM_FONT, self.current_font_size),
+                                 spacing1=sp1, spacing2=sp2, spacing3=sp3)
         self._update_markdown_tag_styles()
         self._schedule_markdown_update()
 
