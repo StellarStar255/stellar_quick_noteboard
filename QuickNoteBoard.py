@@ -468,16 +468,8 @@ class NoteApp:
             style="Toolbar.TButton", width=3)
         self.sidebar_toggle_btn.pack(side=tk.LEFT)
 
-        # 笔记本选择器 (ttk.Combobox)
-        notebook_frame = tk.Frame(self.top_frame)
-        notebook_frame.pack(side=tk.LEFT, padx=(5, 0))
+        # 笔记本当前选中状态（侧边栏列表负责切换；不再显示顶部下拉框）
         self.notebook_var = tk.StringVar(value=self.current_notebook)
-        self.notebook_combo = ttk.Combobox(
-            notebook_frame, textvariable=self.notebook_var,
-            state="readonly", width=10, style="TCombobox")
-        self.notebook_combo.pack(side=tk.LEFT)
-        self.notebook_combo.bind("<<ComboboxSelected>>", self._on_combo_selected)
-        self.update_notebook_menu()
 
         # 右侧按钮组
         font_btn_frame = tk.Frame(self.top_frame)
@@ -541,7 +533,8 @@ class NoteApp:
         self.main_paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         # === 左侧侧边栏：笔记本列表 ===
-        self.sidebar_frame = tk.Frame(self.main_paned, width=150, bg=t["bg"])
+        self._sidebar_width = 150  # 记住用户拖拽设置的宽度（load_config 会覆盖）
+        self.sidebar_frame = tk.Frame(self.main_paned, width=self._sidebar_width, bg=t["bg"])
         self.sidebar_frame.pack_propagate(False)
 
         # 搜索框
@@ -1014,7 +1007,8 @@ class NoteApp:
             self.sidebar_toggle_btn.config(text="▶")
         else:
             # Show sidebar
-            self.main_paned.add(self.sidebar_frame, before=self.main_paned.panes()[0], minsize=120)
+            self.main_paned.add(self.sidebar_frame, before=self.main_paned.panes()[0],
+                                minsize=120, width=getattr(self, '_sidebar_width', 150))
             self.sidebar_visible = True
             self.sidebar_toggle_btn.config(text="☰")
             self.highlight_current_notebook()
@@ -2754,6 +2748,14 @@ class NoteApp:
                     if geometry:
                         self.root.geometry(geometry)
 
+                    # 加载侧边栏宽度（恢复用户上次拖拽设置的宽度）
+                    self._sidebar_width = config.get("sidebar_width", 150)
+                    try:
+                        self.main_paned.paneconfigure(self.sidebar_frame,
+                                                       width=self._sidebar_width)
+                    except Exception as e:
+                        print(f"Error restoring sidebar width: {e}")
+
                     # 加载侧边栏状态
                     sidebar_visible = config.get("sidebar_visible", True)
                     if not sidebar_visible:
@@ -2795,6 +2797,14 @@ class NoteApp:
             self.apply_theme("dark")
 
     def save_config(self):
+        # 仅在侧边栏可见时更新宽度，避免隐藏时把宽度存成 0
+        if getattr(self, 'sidebar_visible', True) and hasattr(self, 'sidebar_frame'):
+            try:
+                w = self.sidebar_frame.winfo_width()
+                if w > 1:
+                    self._sidebar_width = w
+            except Exception:
+                pass
         config = {
             "always_on_top": self.always_on_top.get(),
             "font_size": self.current_font_size,
@@ -2806,6 +2816,7 @@ class NoteApp:
             "geometry": self.root.geometry(),
             "current_notebook": self.current_notebook,
             "sidebar_visible": self.sidebar_visible,
+            "sidebar_width": getattr(self, '_sidebar_width', 150),
             "show_recycle_box": self.show_recycle_box.get(),
             "theme": self.current_theme,
             "outline_width": self._outline_width,
