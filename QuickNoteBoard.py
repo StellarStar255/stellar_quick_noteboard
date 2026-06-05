@@ -3026,6 +3026,14 @@ class NoteApp:
             # Clean up unused attachments (skip in quick mode)
             if not quick:
                 self.cleanup_unused_attachments(content)
+
+            # Refresh sidebar so the just-edited notebook re-sorts to the top
+            # (non-shortcut notebooks are ordered by most recent modification)
+            try:
+                search_text = self.notebook_search_var.get() if hasattr(self, 'notebook_search_var') else ""
+                self.refresh_notebook_listbox(search_text)
+            except Exception as e:
+                print(f"Error refreshing notebook list after save: {e}")
         except Exception as e:
             print(f"Error saving notes: {e}")
 
