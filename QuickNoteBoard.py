@@ -1235,18 +1235,28 @@ class NoteApp:
         # Load saved order and shortcuts (uses cache)
         self.load_notebook_order()
 
-        # Sort: shortcuts first (in their order), then others by custom order
+        # Sort: shortcuts first (in their order), then others by most recently
+        # modified note (newest first)
         shortcuts_set = set(self.notebook_shortcuts)
-        order_dict = {name: idx for idx, name in enumerate(self.notebook_order)}
+
+        def get_notebook_mtime(name):
+            """Last modification time of a notebook's note file (0 if missing)"""
+            note_path = os.path.join(self.notebooks_dir, name, self.note_file)
+            try:
+                return os.path.getmtime(note_path)
+            except OSError:
+                try:
+                    return os.path.getmtime(os.path.join(self.notebooks_dir, name))
+                except OSError:
+                    return 0
 
         def sort_key(name):
             is_shortcut = name in shortcuts_set
             if is_shortcut:
-                return (0, self.notebook_shortcuts.index(name))
+                return (0, self.notebook_shortcuts.index(name), 0, name)
             else:
-                if name in order_dict:
-                    return (1, order_dict[name])
-                return (1, len(self.notebook_order) + notebooks.index(name))
+                # Newest modified first: negate mtime so larger times sort earlier
+                return (1, -get_notebook_mtime(name), 0, name)
 
         return sorted(notebooks, key=sort_key)
 
