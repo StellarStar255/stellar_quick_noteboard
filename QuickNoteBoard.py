@@ -1571,6 +1571,15 @@ class NoteApp:
         if iid:
             self.notebook_listbox.selection_set(iid)
             self.show_notebook_context_menu(event, iid)
+        else:
+            # Right-click on empty area — offer to create a new notebook.
+            menu = self.make_styled_menu()
+            menu.add_command(label=self.tr("new_nb_title"),
+                             command=self.create_notebook)
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
 
     def _on_listbox_drag_start(self, event):
         """Record the item where the drag starts."""
