@@ -5244,15 +5244,28 @@ class NoteApp:
         except Exception:
             top, bottom = 0.0, 1.0
         # At either edge of an overflowing document ("撞墙"), macOS elastic
-        # overscroll keeps re-firing the scroll callback with a jittering pixel
+        # overscroll keeps re-firing the scroll callback with a jittering
         # position, which would flip the active heading between two neighbours
-        # and make the outline flicker. Pin to the boundary heading there.
-        # The extra bound (bottom<1 / top>0) distinguishes a genuine scroll to
-        # the edge from a short doc that simply fits the viewport.
-        if bottom >= 0.999 and top > 0.0001:
-            visible_line = self._outline_headings[-1][0]      # scrolled to bottom
-        elif top <= 0.0001 and bottom < 0.999:
-            visible_line = self._outline_headings[0][0]       # scrolled to top
+        # and make the outline flicker. Latch to the boundary heading once an
+        # edge is reached and only release after the view moves well away (a
+        # hysteresis dead-band), so the bounce jitter can't flip it back.
+        overflow = (bottom - top) < 0.999       # False ⇒ doc fits, never an edge
+        edge = getattr(self, '_ol_scroll_edge', None)
+        if not overflow:
+            edge = None
+        elif bottom >= 0.99:
+            edge = 'bottom'
+        elif top <= 0.01:
+            edge = 'top'
+        elif top > 0.10 and bottom < 0.90:
+            edge = None                         # clearly away from both edges
+        # else: inside the dead-band → keep the current latch.
+        self._ol_scroll_edge = edge
+
+        if edge == 'bottom':
+            visible_line = self._outline_headings[-1][0]
+        elif edge == 'top':
+            visible_line = self._outline_headings[0][0]
         else:
             try:
                 # Use a point ~1/4 down the viewport so the outline highlights
