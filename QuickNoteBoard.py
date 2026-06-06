@@ -891,13 +891,12 @@ class NoteApp:
             self.outline_text.tag_configure("ol_h3", foreground=t["fg_dim"])
             self.outline_text.tag_configure("ol_hover", background=t["bg_tertiary"])
             self.outline_text.tag_configure("ol_active", foreground=t["accent"])
-            self.outline_text.tag_configure("ol_active_hl",
-                                            background=t["accent"],
-                                            foreground="#ffffff")
             for color in self.HIGHLIGHT_NAMES:
-                hl_fg = "#ffffff" if self.current_theme == "dark" else "#1e1e2e"
-                self.outline_text.tag_configure(f"ol_hl_{color}", background=t[f"hl_{color}"],
-                                                foreground=hl_fg)
+                # Highlighted headings get a thin colored left bar (a colored
+                # glyph), not a full text-background fill — keeps a clean,
+                # aligned right edge in the outline.
+                self.outline_text.tag_configure(f"ol_bar_{color}", foreground=t[f"hl_{color}"])
+            self.outline_text.tag_configure("ol_bar_none", foreground=t["bg_secondary"])
             self.text_area.tag_configure("outline_flash", background=t["list_select_bg"])
 
     # ── Internationalisation helpers ──────────────────────────────────────
@@ -4949,10 +4948,15 @@ class NoteApp:
         # Active heading (cursor is under this section)
         self.outline_text.tag_configure("ol_active",
                                         foreground=t["accent"])
-        # Active heading on highlighted background — swap to accent bg for contrast
-        self.outline_text.tag_configure("ol_active_hl",
-                                        background=t["accent"],
-                                        foreground="#ffffff")
+        # Highlighted headings get a thin colored left bar instead of a full
+        # background fill — see _update_outline.
+        for color in self.HIGHLIGHT_NAMES:
+            self.outline_text.tag_configure(f"ol_bar_{color}",
+                                            foreground=t[f"hl_{color}"])
+        # Placeholder bar (no highlight) — painted in the panel bg so it is
+        # invisible but occupies the same width, keeping text aligned.
+        self.outline_text.tag_configure("ol_bar_none",
+                                        foreground=t["bg_secondary"])
 
         # Flash highlight tags
         self.text_area.tag_configure("outline_flash",
@@ -5014,16 +5018,16 @@ class NoteApp:
             # Truncate to fit panel width
             indent_len = len(prefix)
             display_text = text if len(text) + indent_len <= max_chars else text[:max_chars - indent_len - 1] + "…"
-            # Leading padding space (no highlight) to keep left edge aligned
-            self.outline_text.insert(tk.END, " " + prefix, tag)
-            if hl_color:
-                ol_tag = f"ol_hl_{hl_color}"
-                hl_fg = "#ffffff" if self.current_theme == "dark" else "#1e1e2e"
-                self.outline_text.tag_configure(ol_tag, background=t[f"hl_{hl_color}"],
-                                                foreground=hl_fg)
-                self.outline_text.insert(tk.END, display_text, (tag, ol_tag))
-            else:
-                self.outline_text.insert(tk.END, display_text, tag)
+            # col 0: leading space (also the active-arrow slot, see
+            # _highlight_outline_for_line). col 1: thin colored left bar for
+            # highlighted headings, else a space — a colored glyph instead of a
+            # full background fill, so the outline keeps a clean right edge.
+            self.outline_text.insert(tk.END, " ", tag)
+            # Always render the bar glyph (same width on every row so text stays
+            # aligned); colour it when highlighted, else make it invisible.
+            bar_tag = f"ol_bar_{hl_color}" if hl_color else "ol_bar_none"
+            self.outline_text.insert(tk.END, "▎", bar_tag)
+            self.outline_text.insert(tk.END, prefix + display_text, tag)
         self.outline_text.configure(state=tk.DISABLED)
 
         # Auto-hide when no headings, show if toggled on and there are headings
@@ -5057,7 +5061,6 @@ class NoteApp:
             # Highlight clicked item in outline panel
             self.outline_text.configure(state=tk.NORMAL)
             self.outline_text.tag_remove("ol_active", "1.0", tk.END)
-            self.outline_text.tag_remove("ol_active_hl", "1.0", tk.END)
             # Restore previous arrow
             if hasattr(self, '_outline_active_line') and self._outline_active_line > 0:
                 prev = self._outline_active_line
@@ -5067,14 +5070,12 @@ class NoteApp:
             self.outline_text.delete(f"{ol_line + 1}.0", f"{ol_line + 1}.1")
             self.outline_text.insert(f"{ol_line + 1}.0", "▸", "ol_active")
             self._outline_active_line = ol_line + 1
-            src_tags = self.text_area.tag_names(f"{line_num}.0")
-            has_hl = any(f"highlight_{c}" in src_tags for c in self.HIGHLIGHT_NAMES)
-            active_tag = "ol_active_hl" if has_hl else "ol_active"
             level = self._outline_headings[ol_line][1]
-            text_col = 1 + {1: 0, 2: 2, 3: 4}.get(level, 0)
-            self.outline_text.tag_add(active_tag,
+            # Skip arrow slot (col 0) + bar slot (col 1) + indent.
+            text_col = 2 + {1: 0, 2: 2, 3: 4}.get(level, 0)
+            self.outline_text.tag_add("ol_active",
                                       f"{ol_line + 1}.{text_col}", f"{ol_line + 1}.end")
-            self.outline_text.tag_raise(active_tag)
+            self.outline_text.tag_raise("ol_active")
             self.outline_text.configure(state=tk.DISABLED)
             # Flash highlight the heading line in text_area (auto-clears after 1s)
             self._flash_heading_line(line_num)
@@ -5169,7 +5170,6 @@ class NoteApp:
 
         self.outline_text.configure(state=tk.NORMAL)
         self.outline_text.tag_remove("ol_active", "1.0", tk.END)
-        self.outline_text.tag_remove("ol_active_hl", "1.0", tk.END)
         # Restore previous arrow back to space
         if hasattr(self, '_outline_active_line') and self._outline_active_line > 0:
             prev = self._outline_active_line
@@ -5182,15 +5182,12 @@ class NoteApp:
             self.outline_text.delete(f"{ol_line}.0", f"{ol_line}.1")
             self.outline_text.insert(f"{ol_line}.0", "▸", "ol_active")
             self._outline_active_line = ol_line
-            # Check if this heading line in the text_area has a highlight tag
-            src_line, level, _ = self._outline_headings[active_idx]
-            src_tags = self.text_area.tag_names(f"{src_line}.0")
-            has_hl = any(f"highlight_{c}" in src_tags for c in self.HIGHLIGHT_NAMES)
-            active_tag = "ol_active_hl" if has_hl else "ol_active"
-            # Skip leading padding space + indent so highlight aligns with text
-            text_col = 1 + {1: 0, 2: 2, 3: 4}.get(level, 0)
-            self.outline_text.tag_add(active_tag, f"{ol_line}.{text_col}", f"{ol_line}.end")
-            self.outline_text.tag_raise(active_tag)
+            _, level, _ = self._outline_headings[active_idx]
+            # Skip the arrow slot (col 0) + bar slot (col 1) + indent so the
+            # accent colour lands on the heading text, not the left bar.
+            text_col = 2 + {1: 0, 2: 2, 3: 4}.get(level, 0)
+            self.outline_text.tag_add("ol_active", f"{ol_line}.{text_col}", f"{ol_line}.end")
+            self.outline_text.tag_raise("ol_active")
             self.outline_text.see(f"{ol_line}.0")
         self.outline_text.configure(state=tk.DISABLED)
 
