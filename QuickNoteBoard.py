@@ -5022,15 +5022,14 @@ class NoteApp:
             # vertically aligned on every row, active or not:
             #   col 0  leading padding space
             #   col 1  thin colored left bar (highlight indicator)
-            #   col 2  gap
-            #   col 3  active-arrow slot (blank, or "▸" on the active row)
-            #   col 4+ heading text
+            #   col 2  active-arrow slot (blank, or "▸" on the active row)
+            #   col 3+ heading text
             self.outline_text.insert(tk.END, " ", tag)
             # Always render the bar glyph (same width on every row so text stays
             # aligned); colour it when highlighted, else make it invisible.
             bar_tag = f"ol_bar_{hl_color}" if hl_color else "ol_bar_none"
             self.outline_text.insert(tk.END, "▎", bar_tag)
-            self.outline_text.insert(tk.END, "  ", tag)  # gap + blank arrow slot
+            self.outline_text.insert(tk.END, " ", tag)  # blank arrow slot
             self.outline_text.insert(tk.END, prefix + display_text, tag)
         self.outline_text.configure(state=tk.DISABLED)
 
@@ -5065,20 +5064,20 @@ class NoteApp:
             # Highlight clicked item in outline panel
             self.outline_text.configure(state=tk.NORMAL)
             self.outline_text.tag_remove("ol_active", "1.0", tk.END)
-            # Clear the previous row's arrow back to a blank slot (col 3).
+            # Clear the previous row's arrow back to a blank slot (col 2).
             prev = getattr(self, '_outline_active_line', 0)
             if prev > 0:
-                self.outline_text.delete(f"{prev}.3", f"{prev}.4")
-                self.outline_text.insert(f"{prev}.3", " ")
+                self.outline_text.delete(f"{prev}.2", f"{prev}.3")
+                self.outline_text.insert(f"{prev}.2", " ")
             ol_target = ol_line + 1
-            # Drop the arrow into the col-3 slot between the bar and the text.
-            self.outline_text.delete(f"{ol_target}.3", f"{ol_target}.4")
-            self.outline_text.insert(f"{ol_target}.3", "▸", "ol_active")
+            # Drop the arrow into the col-2 slot between the bar and the text.
+            self.outline_text.delete(f"{ol_target}.2", f"{ol_target}.3")
+            self.outline_text.insert(f"{ol_target}.2", "▸", "ol_active")
             self._outline_active_line = ol_target
             self._outline_last_active_idx = ol_line
             level = self._outline_headings[ol_line][1]
-            # Accent-colour the heading text (col 4 + indent), not the bar/arrow.
-            text_col = 4 + {1: 0, 2: 2, 3: 4}.get(level, 0)
+            # Accent-colour the heading text (col 3 + indent), not the bar/arrow.
+            text_col = 3 + {1: 0, 2: 2, 3: 4}.get(level, 0)
             self.outline_text.tag_add("ol_active",
                                       f"{ol_target}.{text_col}", f"{ol_target}.end")
             self.outline_text.tag_raise("ol_active")
@@ -5176,21 +5175,21 @@ class NoteApp:
 
         self.outline_text.configure(state=tk.NORMAL)
         self.outline_text.tag_remove("ol_active", "1.0", tk.END)
-        # Clear the previous row's arrow back to a blank slot (col 3).
+        # Clear the previous row's arrow back to a blank slot (col 2).
         prev = getattr(self, '_outline_active_line', 0)
         if prev > 0:
-            self.outline_text.delete(f"{prev}.3", f"{prev}.4")
-            self.outline_text.insert(f"{prev}.3", " ")
+            self.outline_text.delete(f"{prev}.2", f"{prev}.3")
+            self.outline_text.insert(f"{prev}.2", " ")
         self._outline_active_line = 0
         if active_idx >= 0:
             ol_line = active_idx + 1  # 1-based line in outline_text
             _, level, _ = self._outline_headings[active_idx]
-            # Drop the arrow into the col-3 slot between the bar and the text.
-            self.outline_text.delete(f"{ol_line}.3", f"{ol_line}.4")
-            self.outline_text.insert(f"{ol_line}.3", "▸", "ol_active")
+            # Drop the arrow into the col-2 slot between the bar and the text.
+            self.outline_text.delete(f"{ol_line}.2", f"{ol_line}.3")
+            self.outline_text.insert(f"{ol_line}.2", "▸", "ol_active")
             self._outline_active_line = ol_line
-            # Accent-colour the heading text (col 4 + indent), not the bar/arrow.
-            text_col = 4 + {1: 0, 2: 2, 3: 4}.get(level, 0)
+            # Accent-colour the heading text (col 3 + indent), not the bar/arrow.
+            text_col = 3 + {1: 0, 2: 2, 3: 4}.get(level, 0)
             self.outline_text.tag_add("ol_active", f"{ol_line}.{text_col}", f"{ol_line}.end")
             self.outline_text.tag_raise("ol_active")
             self.outline_text.see(f"{ol_line}.0")
