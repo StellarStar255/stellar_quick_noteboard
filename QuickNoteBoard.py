@@ -506,7 +506,7 @@ class NoteApp:
                    command=self.show_padding_menu, style="Toolbar.TButton", width=5)
         self._btn_padding.pack(side=tk.RIGHT, padx=1)
         self._btn_ui_size = ttk.Button(font_btn_frame, text=self._ui_size_btn_label(),
-                   command=self.show_ui_font_menu, style="Toolbar.TButton", width=8)
+                   command=self.show_ui_font_menu, style="Toolbar.TButton", width=5)
         self._btn_ui_size.pack(side=tk.RIGHT, padx=1)
         self._btn_icon = ttk.Button(font_btn_frame, text=self.tr("icon_btn"),
                    command=self.show_icon_menu, style="Toolbar.TButton", width=4)
@@ -1219,7 +1219,7 @@ class NoteApp:
 
     def _ui_size_btn_label(self):
         """Toolbar label for the UI-font button, always showing the actual size."""
-        return f"{self.tr('ui_size_btn')} {self.ui_font_size}"
+        return f"{self.ui_font_size}px"
 
     def set_ui_font_size(self, size):
         """Set new UI font size and refresh all UI elements"""
