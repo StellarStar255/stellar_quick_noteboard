@@ -5240,12 +5240,27 @@ class NoteApp:
         import time
         self._outline_scroll_last = time.time() * 1000
         try:
-            # Use a point ~1/4 down the viewport so the outline highlights
-            # the heading a bit earlier, before it scrolls off the top.
-            offset_y = self.text_area.winfo_height() // 4
-            visible_line = int(self.text_area.index(f"@0,{offset_y}").split('.')[0])
+            top, bottom = self.text_area.yview()
         except Exception:
-            return
+            top, bottom = 0.0, 1.0
+        # At either edge of an overflowing document ("撞墙"), macOS elastic
+        # overscroll keeps re-firing the scroll callback with a jittering pixel
+        # position, which would flip the active heading between two neighbours
+        # and make the outline flicker. Pin to the boundary heading there.
+        # The extra bound (bottom<1 / top>0) distinguishes a genuine scroll to
+        # the edge from a short doc that simply fits the viewport.
+        if bottom >= 0.999 and top > 0.0001:
+            visible_line = self._outline_headings[-1][0]      # scrolled to bottom
+        elif top <= 0.0001 and bottom < 0.999:
+            visible_line = self._outline_headings[0][0]       # scrolled to top
+        else:
+            try:
+                # Use a point ~1/4 down the viewport so the outline highlights
+                # the heading a bit earlier, before it scrolls off the top.
+                offset_y = self.text_area.winfo_height() // 4
+                visible_line = int(self.text_area.index(f"@0,{offset_y}").split('.')[0])
+            except Exception:
+                return
         self._highlight_outline_for_line(visible_line)
 
     def _highlight_outline_for_line(self, text_line):
