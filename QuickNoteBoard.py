@@ -4962,7 +4962,6 @@ class NoteApp:
         self.text_area.tag_configure("outline_flash",
                                      background=t["list_select_bg"])
         self._outline_flash_timer = None
-        self._outline_active_line = 0
 
         self.outline_text.bind("<Button-1>", self._on_outline_click)
         self.outline_text.bind("<Motion>", self._on_outline_hover)
@@ -4987,9 +4986,8 @@ class NoteApp:
 
         self.outline_text.configure(state=tk.NORMAL)
         self.outline_text.delete("1.0", tk.END)
-        self._outline_active_line = 0
-        # Outline rebuilt — invalidate the active-index cache so the arrow is
-        # re-drawn (see _highlight_outline_for_line's same-index fast path).
+        # Outline rebuilt — invalidate the active-index cache so the active
+        # heading is re-tagged (see _highlight_outline_for_line's fast path).
         self._outline_last_active_idx = None
         t = self.THEMES[self.current_theme]
         indent = {1: "", 2: "  ", 3: "    "}
@@ -5018,10 +5016,9 @@ class NoteApp:
             # Truncate to fit panel width
             indent_len = len(prefix)
             display_text = text if len(text) + indent_len <= max_chars else text[:max_chars - indent_len - 1] + "…"
-            # col 0: leading space (also the active-arrow slot, see
-            # _highlight_outline_for_line). col 1: thin colored left bar for
-            # highlighted headings, else a space — a colored glyph instead of a
-            # full background fill, so the outline keeps a clean right edge.
+            # col 0: leading padding space. col 1: thin colored left bar for
+            # highlighted headings — a colored glyph instead of a full
+            # background fill, so the outline keeps a clean right edge.
             self.outline_text.insert(tk.END, " ", tag)
             # Always render the bar glyph (same width on every row so text stays
             # aligned); colour it when highlighted, else make it invisible.
@@ -5061,17 +5058,8 @@ class NoteApp:
             # Highlight clicked item in outline panel
             self.outline_text.configure(state=tk.NORMAL)
             self.outline_text.tag_remove("ol_active", "1.0", tk.END)
-            # Restore previous arrow
-            if hasattr(self, '_outline_active_line') and self._outline_active_line > 0:
-                prev = self._outline_active_line
-                self.outline_text.delete(f"{prev}.0", f"{prev}.1")
-                self.outline_text.insert(f"{prev}.0", " ")
-            # Set new arrow
-            self.outline_text.delete(f"{ol_line + 1}.0", f"{ol_line + 1}.1")
-            self.outline_text.insert(f"{ol_line + 1}.0", "▸", "ol_active")
-            self._outline_active_line = ol_line + 1
             level = self._outline_headings[ol_line][1]
-            # Skip arrow slot (col 0) + bar slot (col 1) + indent.
+            # Skip blank col 0 + bar slot (col 1) + indent.
             text_col = 2 + {1: 0, 2: 2, 3: 4}.get(level, 0)
             self.outline_text.tag_add("ol_active",
                                       f"{ol_line + 1}.{text_col}", f"{ol_line + 1}.end")
@@ -5170,21 +5158,12 @@ class NoteApp:
 
         self.outline_text.configure(state=tk.NORMAL)
         self.outline_text.tag_remove("ol_active", "1.0", tk.END)
-        # Restore previous arrow back to space
-        if hasattr(self, '_outline_active_line') and self._outline_active_line > 0:
-            prev = self._outline_active_line
-            self.outline_text.delete(f"{prev}.0", f"{prev}.1")
-            self.outline_text.insert(f"{prev}.0", " ")
-        self._outline_active_line = 0
         if active_idx >= 0:
             ol_line = active_idx + 1  # 1-based line in outline_text
-            # Replace leading space with arrow
-            self.outline_text.delete(f"{ol_line}.0", f"{ol_line}.1")
-            self.outline_text.insert(f"{ol_line}.0", "▸", "ol_active")
-            self._outline_active_line = ol_line
             _, level, _ = self._outline_headings[active_idx]
-            # Skip the arrow slot (col 0) + bar slot (col 1) + indent so the
-            # accent colour lands on the heading text, not the left bar.
+            # Active section is shown by accent-coloured text alone. Skip the
+            # blank col 0 + bar slot (col 1) + indent so the accent lands on the
+            # heading text, not the left bar.
             text_col = 2 + {1: 0, 2: 2, 3: 4}.get(level, 0)
             self.outline_text.tag_add("ol_active", f"{ol_line}.{text_col}", f"{ol_line}.end")
             self.outline_text.tag_raise("ol_active")
