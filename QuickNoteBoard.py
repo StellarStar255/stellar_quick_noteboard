@@ -2454,24 +2454,121 @@ class NoteApp:
         self.text_area.focus_set()
         return "break"  # Prevent default Tab behavior
 
+    @staticmethod
+    def _blend(hex_a, hex_b, ratio):
+        """Blend two #rrggbb colors; ratio 0 → hex_a, 1 → hex_b."""
+        a = tuple(int(hex_a[i:i + 2], 16) for i in (1, 3, 5))
+        b = tuple(int(hex_b[i:i + 2], 16) for i in (1, 3, 5))
+        c = tuple(round(a[i] + (b[i] - a[i]) * ratio) for i in range(3))
+        return "#%02x%02x%02x" % c
+
+    def _styled_input_dialog(self, title, label_text, on_submit,
+                             initial="", confirm_text=None):
+        """A clean, borderless, centered input dialog styled for the theme.
+
+        on_submit(value, dialog) is called on confirm/Return; it validates and
+        is responsible for closing the dialog (dialog.destroy()) on success.
+        Returns (dialog, entry).
+        """
+        t = self.current_theme_colors
+        uf = self.ui_font_size
+        confirm_text = confirm_text or self.tr("create")
+        hover_accent = self._blend(t["accent"], "#ffffff", 0.18)
+
+        dialog = tk.Toplevel(self.root)
+        dialog.transient(self.root)
+        dialog.overrideredirect(True)          # drop the native title bar
+        dialog.configure(bg=t["border"])       # 1px outer hairline border
+
+        card = tk.Frame(dialog, bg=t["bg_secondary"])
+        card.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+
+        # ── Header: title + close, doubles as the drag handle ──
+        header = tk.Frame(card, bg=t["bg_secondary"])
+        header.pack(fill=tk.X, padx=18, pady=(14, 0))
+        title_lbl = tk.Label(header, text=title, bg=t["bg_secondary"], fg=t["fg"],
+                             font=(SYSTEM_FONT, uf + 1, "bold"))
+        title_lbl.pack(side=tk.LEFT)
+        close_btn = tk.Label(header, text="✕", bg=t["bg_secondary"], fg=t["fg_dim"],
+                             font=(SYSTEM_FONT, uf), cursor="hand2")
+        close_btn.pack(side=tk.RIGHT)
+        close_btn.bind("<Button-1>", lambda e: dialog.destroy())
+        close_btn.bind("<Enter>", lambda e: close_btn.configure(fg=t["fg"]))
+        close_btn.bind("<Leave>", lambda e: close_btn.configure(fg=t["fg_dim"]))
+
+        # ── Field label ──
+        tk.Label(card, text=label_text, bg=t["bg_secondary"], fg=t["fg_dim"],
+                 font=(SYSTEM_FONT, uf)).pack(anchor="w", padx=18, pady=(16, 6))
+
+        # ── Entry ──
+        entry = tk.Entry(card, bg=t["entry_bg"], fg=t["entry_fg"],
+                         insertbackground=t["text_insert"], relief=tk.FLAT,
+                         font=(SYSTEM_FONT, uf + 1), highlightthickness=1,
+                         highlightbackground=t["border"], highlightcolor=t["accent"])
+        entry.pack(fill=tk.X, padx=18, ipady=7)
+        if initial:
+            entry.insert(0, initial)
+            entry.select_range(0, tk.END)
+
+        # ── Buttons ──
+        btns = tk.Frame(card, bg=t["bg_secondary"])
+        btns.pack(fill=tk.X, padx=18, pady=(18, 16))
+
+        def submit(_=None):
+            on_submit(entry.get().strip(), dialog)
+
+        confirm = tk.Label(btns, text=confirm_text, bg=t["accent"], fg="#ffffff",
+                           font=(SYSTEM_FONT, uf, "bold"), cursor="hand2",
+                           padx=18, pady=7)
+        confirm.pack(side=tk.RIGHT)
+        confirm.bind("<Button-1>", submit)
+        confirm.bind("<Enter>", lambda e: confirm.configure(bg=hover_accent))
+        confirm.bind("<Leave>", lambda e: confirm.configure(bg=t["accent"]))
+
+        cancel = tk.Label(btns, text=self.tr("cancel"), bg=t["bg_tertiary"], fg=t["fg"],
+                          font=(SYSTEM_FONT, uf), cursor="hand2", padx=16, pady=7)
+        cancel.pack(side=tk.RIGHT, padx=(0, 8))
+        cancel.bind("<Button-1>", lambda e: dialog.destroy())
+        cancel.bind("<Enter>", lambda e: cancel.configure(bg=t["border"]))
+        cancel.bind("<Leave>", lambda e: cancel.configure(bg=t["bg_tertiary"]))
+
+        entry.bind("<Return>", submit)
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
+
+        # ── Drag the borderless window by its header ──
+        drag = {"x": 0, "y": 0}
+
+        def start_drag(e):
+            drag["x"], drag["y"] = e.x, e.y
+
+        def do_drag(e):
+            dialog.geometry(f"+{e.x_root - drag['x']}+{e.y_root - drag['y']}")
+
+        for w in (header, title_lbl):
+            w.bind("<Button-1>", start_drag)
+            w.bind("<B1-Motion>", do_drag)
+
+        # ── Center over the main window ──
+        dialog.update_idletasks()
+        w = max(360, dialog.winfo_reqwidth())
+        h = dialog.winfo_reqheight()
+        px, py = self.root.winfo_rootx(), self.root.winfo_rooty()
+        pw, ph = self.root.winfo_width(), self.root.winfo_height()
+        x = px + (pw - w) // 2
+        y = py + max(0, (ph - h) // 3)
+        dialog.geometry(f"{w}x{h}+{x}+{y}")
+        # Borderless windows need an explicit lift to clear the main window —
+        # especially when it is pinned on-top (置顶 mode).
+        dialog.lift()
+        dialog.attributes("-topmost", True)
+        dialog.grab_set()
+        dialog.focus_force()
+        entry.focus_set()
+        return dialog, entry
+
     def create_notebook(self):
         """Create a new notebook"""
-        t = self.current_theme_colors
-        dialog = tk.Toplevel(self.root)
-        dialog.title(self.tr("new_nb_title"))
-        dialog.geometry("300x120")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.configure(bg=t["bg"])
-
-        tk.Label(dialog, text=self.tr("nb_name_label"), bg=t["bg"], fg=t["fg"],
-                 font=(SYSTEM_FONT, self.ui_font_size)).pack(pady=(10, 5))
-        entry = ttk.Entry(dialog, width=30, style="Sidebar.TEntry")
-        entry.pack(pady=5, padx=20)
-        entry.focus_set()
-
-        def do_create():
-            name = entry.get().strip()
+        def do_create(name, dialog):
             if name and name not in self.get_notebooks_list():
                 notebook_path = os.path.join(self.notebooks_dir, name)
                 os.makedirs(notebook_path)
@@ -2484,9 +2581,8 @@ class NoteApp:
                 import tkinter.messagebox as messagebox
                 messagebox.showwarning(self.tr("warning"), self.tr("nb_exists"), parent=dialog)
 
-        entry.bind("<Return>", lambda e: do_create())
-        ttk.Button(dialog, text=self.tr("create"), command=do_create,
-                   style="Toolbar.TButton").pack(pady=10)
+        self._styled_input_dialog(self.tr("new_nb_title"), self.tr("nb_name_label"),
+                                  do_create, confirm_text=self.tr("create"))
 
     def rename_notebook(self):
         """Rename current notebook"""
@@ -2495,24 +2591,7 @@ class NoteApp:
             messagebox.showwarning(self.tr("warning"), self.tr("no_rename_def"))
             return
 
-        t = self.current_theme_colors
-        dialog = tk.Toplevel(self.root)
-        dialog.title(self.tr("rename_nb_title"))
-        dialog.geometry("300x120")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.configure(bg=t["bg"])
-
-        tk.Label(dialog, text=self.tr("new_name_label"), bg=t["bg"], fg=t["fg"],
-                 font=(SYSTEM_FONT, self.ui_font_size)).pack(pady=(10, 5))
-        entry = ttk.Entry(dialog, width=30, style="Sidebar.TEntry")
-        entry.insert(0, self.current_notebook)
-        entry.pack(pady=5, padx=20)
-        entry.select_range(0, tk.END)
-        entry.focus_set()
-
-        def do_rename():
-            new_name = entry.get().strip()
+        def do_rename(new_name, dialog):
             if new_name and new_name != self.current_notebook:
                 if new_name in self.get_notebooks_list():
                     import tkinter.messagebox as messagebox
@@ -2528,10 +2607,12 @@ class NoteApp:
                 self.refresh_notebook_listbox(self.notebook_search_var.get())
                 self.save_config()
                 dialog.destroy()
+            else:
+                dialog.destroy()
 
-        entry.bind("<Return>", lambda e: do_rename())
-        ttk.Button(dialog, text=self.tr("rename"), command=do_rename,
-                   style="Toolbar.TButton").pack(pady=10)
+        self._styled_input_dialog(self.tr("rename_nb_title"), self.tr("new_name_label"),
+                                  do_rename, initial=self.current_notebook,
+                                  confirm_text=self.tr("rename"))
 
     def delete_notebook(self):
         """Delete current notebook"""
