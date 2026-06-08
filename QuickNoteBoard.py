@@ -309,6 +309,9 @@ class NoteApp:
 
     HIGHLIGHT_NAMES = ("green", "yellow", "red", "orange", "purple")
 
+    # Sentinel iid for the non-selectable divider between starred and normal notes
+    SEP_IID = "\x00__nb_separator__"
+
     def __init__(self, root):
         self.root = root
         self.root.title("Quick Note Board")
@@ -1521,9 +1524,26 @@ class NoteApp:
             search_lower = search_text.lower()
             notebooks = [n for n in notebooks if search_lower in n.lower()]
 
-        # Add notebooks with shortcut indicator (iid = actual notebook name)
+        # Divider styling (dim, non-selectable look)
+        try:
+            tree.tag_configure("nb_sep",
+                               foreground=self.current_theme_colors["border"])
+        except Exception:
+            pass
+
+        # Add notebooks with shortcut indicator (iid = actual notebook name).
+        # Insert a divider row between the starred (shortcut) notes and the rest
+        # so the boundary is easy to spot.
+        shortcuts_set = set(self.notebook_shortcuts)
+        sep_added = False
         for name in notebooks:
-            display_name = f"★ {name}" if name in self.notebook_shortcuts else name
+            is_shortcut = name in shortcuts_set
+            if (not is_shortcut) and (not sep_added) and any(
+                    n in shortcuts_set for n in notebooks):
+                tree.insert("", tk.END, iid=self.SEP_IID,
+                            text="─" * 24, tags=("nb_sep",))
+                sep_added = True
+            display_name = f"★ {name}" if is_shortcut else name
             tree.insert("", tk.END, iid=name, text=display_name)
 
         # Highlight current notebook
@@ -1555,20 +1575,24 @@ class NoteApp:
         selection = self.notebook_listbox.selection()
         if selection:
             actual_name = selection[0]  # iid is the actual notebook name
+            if actual_name == self.SEP_IID:
+                # Divider isn't a real note — bounce selection back to current
+                self.highlight_current_notebook()
+                return
             if actual_name != self.current_notebook:
                 self.switch_notebook(actual_name)
 
     def on_notebook_listbox_double_click(self, event):
         """Handle double click on notebook list - show context menu"""
         selection = self.notebook_listbox.selection()
-        if selection:
+        if selection and selection[0] != self.SEP_IID:
             self.show_notebook_context_menu(event, selection[0])
 
     def on_notebook_listbox_right_click(self, event):
         """Handle right click on notebook list - show context menu"""
         # Select the item under cursor
         iid = self.notebook_listbox.identify_row(event.y)
-        if iid:
+        if iid and iid != self.SEP_IID:
             self.notebook_listbox.selection_set(iid)
             self.show_notebook_context_menu(event, iid)
         else:
@@ -1583,7 +1607,8 @@ class NoteApp:
 
     def _on_listbox_drag_start(self, event):
         """Record the item where the drag starts."""
-        self._drag_start_iid = self.notebook_listbox.identify_row(event.y)
+        iid = self.notebook_listbox.identify_row(event.y)
+        self._drag_start_iid = None if iid == self.SEP_IID else iid
         self._drag_active = False
         self._drag_out_of_bounds = False
 
@@ -1603,7 +1628,7 @@ class NoteApp:
             tree.config(cursor="")
 
         target = tree.identify_row(event.y)
-        if not target or target == self._drag_start_iid:
+        if not target or target == self.SEP_IID or target == self._drag_start_iid:
             if not self._drag_active and target and target != self._drag_start_iid:
                 self._drag_active = True
             return
@@ -1626,8 +1651,10 @@ class NoteApp:
             return
 
         if self._drag_active:
-            # Rebuild notebook_order from the current list order (iids = names)
-            self.notebook_order = list(self.notebook_listbox.get_children())
+            # Rebuild notebook_order from the current list order (iids = names),
+            # excluding the divider row.
+            self.notebook_order = [iid for iid in self.notebook_listbox.get_children()
+                                   if iid != self.SEP_IID]
             self.save_notebook_order()
             self.update_notebook_menu()
             self.highlight_current_notebook()
