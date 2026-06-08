@@ -309,8 +309,10 @@ class NoteApp:
 
     HIGHLIGHT_NAMES = ("green", "yellow", "red", "orange", "purple")
 
-    # Sentinel iid for the non-selectable divider between starred and normal notes
-    SEP_IID = "\x00__nb_separator__"
+    # Sentinel iid for the non-selectable divider between starred and normal
+    # notes. Contains "/" so it can never collide with a notebook (directory)
+    # name. (A NUL byte would be truncated by Tcl to "" and clash with root.)
+    SEP_IID = "//nb-separator//"
 
     def __init__(self, root):
         self.root = root
