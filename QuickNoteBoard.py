@@ -5257,9 +5257,18 @@ class NoteApp:
             edge = 'bottom'
         elif top <= 0.01:
             edge = 'top'
-        elif top > 0.10 and bottom < 0.90:
-            edge = None                         # clearly away from both edges
-        # else: inside the dead-band → keep the current latch.
+        else:
+            # Away from the edges. Release a latched edge as soon as the view
+            # moves a little past it, using a SMALL edge-specific dead-band.
+            # (The old `top > 0.10` band never released on long documents, where
+            # scrolling past many headings is still only a few % of yview — the
+            # arrow then stayed stuck on the first heading.) The tiny band still
+            # absorbs macOS elastic-overscroll jitter right at the boundary.
+            if edge == 'top' and top > 0.02:
+                edge = None
+            elif edge == 'bottom' and bottom < 0.98:
+                edge = None
+            # else: still within the tiny near-edge band → keep the latch.
         self._ol_scroll_edge = edge
 
         if edge == 'bottom':
