@@ -665,7 +665,7 @@ class NoteApp:
         # --- 主内容区域：左侧侧边栏 + 右侧内容 ---
         t = self.current_theme_colors
         self.main_paned = tk.PanedWindow(root, orient=tk.HORIZONTAL, sashwidth=8,
-                                          sashrelief=tk.RAISED, sashpad=0,
+                                          sashrelief=tk.FLAT, sashpad=0,
                                           opaqueresize=True, bg=t["paned_sash"])
         self.main_paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -684,6 +684,8 @@ class NoteApp:
         self.notebook_search_entry = ttk.Entry(search_frame, textvariable=self.notebook_search_var,
                                                 width=15, style="Sidebar.TEntry")
         self.notebook_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+        self._attach_placeholder(self.notebook_search_entry,
+                                 self.notebook_search_var, "search_placeholder")
 
         # 笔记本列表
         list_frame = tk.Frame(self.sidebar_frame, bg=t["bg"])
@@ -747,13 +749,21 @@ class NoteApp:
                    command=self.recycle_note, style="Toolbar.TButton")
         self._btn_recycle.pack(side=tk.LEFT, padx=5)
 
-        # 状态栏：字数统计（packed BOTTOM first so text_container fills the rest）
+        # 状态栏：顶部细线 + 左侧笔记本名 + 右侧字数统计
+        # （packed BOTTOM first so text_container fills the rest）
         self._status_bar = tk.Frame(self.right_content, bg=t["bg"])
         self._status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        self._status_sep = tk.Frame(self._status_bar, bg=t["border"], height=1)
+        self._status_sep.pack(side=tk.TOP, fill=tk.X)
+        _status_font = (SYSTEM_FONT, max(10, self.ui_font_size - 3))
+        self._status_nb_label = tk.Label(
+            self._status_bar, text="", anchor="w", bg=t["bg"], fg=t["fg_dim"],
+            font=_status_font)
+        self._status_nb_label.pack(side=tk.LEFT, padx=8, pady=2)
         self._wordcount_label = tk.Label(
             self._status_bar, text="", anchor="e", bg=t["bg"], fg=t["fg_dim"],
-            font=(SYSTEM_FONT, max(10, self.ui_font_size - 3)))
-        self._wordcount_label.pack(side=tk.RIGHT, padx=8, pady=(0, 2))
+            font=_status_font)
+        self._wordcount_label.pack(side=tk.RIGHT, padx=8, pady=2)
         self._wc_timer_id = None
 
         # 文本区域容器 (包含文本和滚动条)
@@ -948,7 +958,7 @@ class NoteApp:
 
         # Main paned window
         if hasattr(self, 'main_paned'):
-            self.main_paned.configure(bg=t["paned_sash"], sashrelief=tk.RAISED)
+            self.main_paned.configure(bg=t["paned_sash"], sashrelief=tk.FLAT)
 
         # Text area
         if hasattr(self, 'text_area'):
@@ -979,10 +989,23 @@ class NoteApp:
         if hasattr(self, 'text_container'):
             self.text_container.configure(bg=t["bg"])
 
-        # Word count status bar
+        # Status bar (separator line, notebook name, word count)
         if hasattr(self, '_wordcount_label'):
             self._status_bar.configure(bg=t["bg"])
+            self._status_sep.configure(bg=t["border"])
+            self._status_nb_label.configure(bg=t["bg"], fg=t["fg_dim"])
             self._wordcount_label.configure(bg=t["bg"], fg=t["fg_dim"])
+
+        # Entry placeholder overlays
+        if hasattr(self, '_placeholder_labels'):
+            alive = []
+            for lbl in self._placeholder_labels:
+                try:
+                    lbl.configure(bg=t["entry_bg"], fg=t["fg_placeholder"])
+                    alive.append(lbl)
+                except tk.TclError:
+                    pass  # parent entry was destroyed (e.g. closed dialog)
+            self._placeholder_labels = alive
 
         # Update text tags
         self._update_text_tags()
@@ -1006,9 +1029,10 @@ class NoteApp:
                                           highlightcolor=t["accent"],
                                           highlightbackground=t["border"])
             self._search_count_label.configure(bg=t["bg_secondary"], fg=t["fg_dim"])
-            for btn in (self._search_prev_btn, self._search_next_btn, self._search_close_btn,
-                        self._replace_btn, self._replace_all_btn):
+            for btn in (self._search_prev_btn, self._search_next_btn, self._search_close_btn):
                 btn.configure(bg=t["bg_secondary"], fg=t["fg_dim"])
+            for chip in (self._replace_btn, self._replace_all_btn):
+                chip.configure(bg=t["bg_tertiary"], fg=t["fg"])
             self._replace_entry.configure(bg=t["entry_bg"], fg=t["entry_fg"],
                                            insertbackground=t["text_insert"],
                                            highlightcolor=t["accent"],
@@ -1098,6 +1122,60 @@ class NoteApp:
         # Word count status bar (if created)
         if hasattr(self, "_wordcount_label"):
             self._update_word_count()
+        # Entry placeholder overlays
+        if hasattr(self, "_placeholder_labels"):
+            for lbl in self._placeholder_labels:
+                try:
+                    lbl.configure(text=self.tr(lbl._i18n_key))
+                except tk.TclError:
+                    pass
+
+    # ── Small UI polish helpers ──────────────────────────────────────────
+
+    def _attach_placeholder(self, entry, var, text_key):
+        """Overlay a dim placeholder label on *entry* that hides as soon as
+        the entry has content. Theme- and language-aware via
+        self._placeholder_labels."""
+        t = self.current_theme_colors
+        lbl = tk.Label(entry, text=self.tr(text_key),
+                       bg=t["entry_bg"], fg=t["fg_placeholder"],
+                       font=entry.cget("font"), cursor="xterm")
+        lbl._i18n_key = text_key
+        lbl.bind("<Button-1>", lambda e: entry.focus_set())
+
+        def refresh(*_):
+            try:
+                if var.get():
+                    lbl.place_forget()
+                else:
+                    lbl.place(x=6, rely=0.5, anchor="w")
+            except tk.TclError:
+                pass
+
+        var.trace_add("write", refresh)
+        refresh()
+        if not hasattr(self, "_placeholder_labels"):
+            self._placeholder_labels = []
+        self._placeholder_labels.append(lbl)
+        return lbl
+
+    def _bind_hover_fg(self, widget):
+        """Dim label that brightens on hover (theme looked up at event time)."""
+        widget.bind("<Enter>", lambda e, w=widget: w.configure(
+            fg=self.current_theme_colors["fg"]))
+        widget.bind("<Leave>", lambda e, w=widget: w.configure(
+            fg=self.current_theme_colors["fg_dim"]))
+
+    def _bind_hover_chip(self, widget):
+        """Small chip-style button: hover fills with the accent color."""
+        def on_enter(e, w=widget):
+            t = self.current_theme_colors
+            w.configure(bg=t["accent"], fg="#ffffff")
+        def on_leave(e, w=widget):
+            t = self.current_theme_colors
+            w.configure(bg=t["bg_tertiary"], fg=t["fg"])
+        widget.bind("<Enter>", on_enter)
+        widget.bind("<Leave>", on_leave)
 
     def toggle_theme(self):
         """Switch between dark and light themes."""
@@ -2408,6 +2486,7 @@ class NoteApp:
 
         # Update window title and UI first (instant feedback)
         self.root.title(f"Quick Note Board - {notebook_name}")
+        self._update_status_notebook()
         self.notebook_var.set(notebook_name)
         self.highlight_current_notebook()
 
@@ -2793,6 +2872,7 @@ class NoteApp:
                 os.rename(old_path, new_path)
                 self.current_notebook = new_name
                 self.root.title(f"Quick Note Board - {new_name}")
+                self._update_status_notebook()
                 self.notebook_var.set(new_name)
                 self.update_notebook_menu()
                 self.refresh_notebook_listbox(self.notebook_search_var.get())
@@ -3230,6 +3310,7 @@ mark.hl-purple { background: #e6d4f7; }
                              font=(SYSTEM_FONT, uf), cursor="hand2")
         close_btn.pack(side=tk.RIGHT)
         close_btn.bind("<Button-1>", lambda e: dialog.destroy())
+        self._bind_hover_fg(close_btn)
 
         body = tk.Frame(card, bg=t["bg_secondary"])
         body.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 8))
@@ -3309,18 +3390,23 @@ mark.hl-purple { background: #e6d4f7; }
             self.content_modified = True
             self.schedule_auto_save()
 
+        hover_accent = self._blend(t["accent"], "#ffffff", 0.18)
         restore_btn = tk.Label(btns, text=self.tr("restore_btn"),
                                bg=t["accent"], fg="#ffffff",
                                font=(SYSTEM_FONT, uf, "bold"), cursor="hand2",
                                padx=18, pady=7)
         restore_btn.pack(side=tk.RIGHT)
         restore_btn.bind("<Button-1>", lambda e: do_restore())
+        restore_btn.bind("<Enter>", lambda e: restore_btn.configure(bg=hover_accent))
+        restore_btn.bind("<Leave>", lambda e: restore_btn.configure(bg=t["accent"]))
 
         cancel = tk.Label(btns, text=self.tr("cancel"), bg=t["bg_tertiary"],
                           fg=t["fg"], font=(SYSTEM_FONT, uf), cursor="hand2",
                           padx=16, pady=7)
         cancel.pack(side=tk.RIGHT, padx=(0, 8))
         cancel.bind("<Button-1>", lambda e: dialog.destroy())
+        cancel.bind("<Enter>", lambda e: cancel.configure(bg=t["border"]))
+        cancel.bind("<Leave>", lambda e: cancel.configure(bg=t["bg_tertiary"]))
 
         dialog.bind("<Escape>", lambda e: dialog.destroy())
 
@@ -3564,6 +3650,7 @@ mark.hl-purple { background: #e6d4f7; }
                 print(f"Error loading notes: {e}")
         # Update window title
         self.root.title(f"Quick Note Board - {self.current_notebook}")
+        self._update_status_notebook()
         # Initialize last_saved_content to prevent unnecessary auto-save on startup
         self.last_saved_content = self.get_content_with_markers()
         # Clear Tk native undo stack (initial load is not undoable)
@@ -5530,6 +5617,16 @@ mark.hl-purple { background: #e6d4f7; }
 
     # ── Word Count Status Bar ────────────────────────────────────────────
 
+    def _update_status_notebook(self):
+        """Show the current notebook name on the left of the status bar."""
+        if not hasattr(self, '_status_nb_label'):
+            return
+        icon = "" if _IS_LINUX else "\U0001f4d3 "
+        try:
+            self._status_nb_label.configure(text=f"{icon}{self.current_notebook}")
+        except tk.TclError:
+            pass
+
     def _schedule_word_count(self):
         """Debounced word-count refresh."""
         if getattr(self, '_wc_timer_id', None) is not None:
@@ -5593,7 +5690,9 @@ mark.hl-purple { background: #e6d4f7; }
             insertbackground=t["text_insert"],
             highlightthickness=1, highlightcolor=t["accent"],
             highlightbackground=t["border"], relief=tk.FLAT)
-        self._search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=3)
+        self._attach_placeholder(self._search_entry, self._search_var,
+                                 "search_placeholder")
 
         # Match count label
         self._search_count_label = tk.Label(
@@ -5608,12 +5707,14 @@ mark.hl-purple { background: #e6d4f7; }
             bg=t["bg_secondary"], fg=t["fg_dim"])
         self._search_prev_btn.pack(side=tk.LEFT, padx=2)
         self._search_prev_btn.bind("<Button-1>", lambda e: self._search_prev())
+        self._bind_hover_fg(self._search_prev_btn)
 
         self._search_next_btn = tk.Label(
             inner, text="▼", font=btn_font, cursor="hand2",
             bg=t["bg_secondary"], fg=t["fg_dim"])
         self._search_next_btn.pack(side=tk.LEFT, padx=2)
         self._search_next_btn.bind("<Button-1>", lambda e: self._search_next())
+        self._bind_hover_fg(self._search_next_btn)
 
         # Close button
         self._search_close_btn = tk.Label(
@@ -5621,10 +5722,11 @@ mark.hl-purple { background: #e6d4f7; }
             bg=t["bg_secondary"], fg=t["fg_dim"])
         self._search_close_btn.pack(side=tk.LEFT, padx=(2, 0))
         self._search_close_btn.bind("<Button-1>", lambda e: self._close_search_bar())
+        self._bind_hover_fg(self._search_close_btn)
 
         # ── Replace row ──
         replace_row = tk.Frame(self._search_frame, bg=t["bg_secondary"])
-        replace_row.pack(fill=tk.X, padx=6, pady=(0, 4))
+        replace_row.pack(fill=tk.X, padx=6, pady=(0, 5))
 
         self._replace_var = tk.StringVar()
         self._replace_entry = tk.Entry(
@@ -5634,19 +5736,24 @@ mark.hl-purple { background: #e6d4f7; }
             insertbackground=t["text_insert"],
             highlightthickness=1, highlightcolor=t["accent"],
             highlightbackground=t["border"], relief=tk.FLAT)
-        self._replace_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._replace_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=3)
+        self._attach_placeholder(self._replace_entry, self._replace_var,
+                                 "replace_placeholder")
 
+        chip_font = (SYSTEM_FONT, max(10, self.ui_font_size - 1))
         self._replace_btn = tk.Label(
-            replace_row, text=self.tr("replace_btn"), font=btn_font,
-            cursor="hand2", bg=t["bg_secondary"], fg=t["fg_dim"], padx=4)
+            replace_row, text=self.tr("replace_btn"), font=chip_font,
+            cursor="hand2", bg=t["bg_tertiary"], fg=t["fg"], padx=10, pady=3)
         self._replace_btn.pack(side=tk.LEFT, padx=(6, 2))
         self._replace_btn.bind("<Button-1>", lambda e: self._replace_current())
+        self._bind_hover_chip(self._replace_btn)
 
         self._replace_all_btn = tk.Label(
-            replace_row, text=self.tr("replace_all_btn"), font=btn_font,
-            cursor="hand2", bg=t["bg_secondary"], fg=t["fg_dim"], padx=4)
+            replace_row, text=self.tr("replace_all_btn"), font=chip_font,
+            cursor="hand2", bg=t["bg_tertiary"], fg=t["fg"], padx=10, pady=3)
         self._replace_all_btn.pack(side=tk.LEFT, padx=2)
         self._replace_all_btn.bind("<Button-1>", lambda e: self._replace_all())
+        self._bind_hover_chip(self._replace_all_btn)
 
         # Key bindings on the entry
         self._search_entry.bind("<Return>", lambda e: self._search_next())
@@ -5895,6 +6002,7 @@ mark.hl-purple { background: #e6d4f7; }
                              font=(SYSTEM_FONT, uf), cursor="hand2")
         close_btn.pack(side=tk.RIGHT)
         close_btn.bind("<Button-1>", lambda e: dialog.destroy())
+        self._bind_hover_fg(close_btn)
 
         entry_var = tk.StringVar()
         entry = tk.Entry(card, textvariable=entry_var,
@@ -5904,34 +6012,79 @@ mark.hl-purple { background: #e6d4f7; }
                          highlightthickness=1, highlightcolor=t["accent"],
                          highlightbackground=t["border"])
         entry.pack(fill=tk.X, padx=14, pady=(10, 8), ipady=6)
+        self._attach_placeholder(entry, entry_var, "global_search_hint")
 
         list_frame = tk.Frame(card, bg=t["bg_secondary"])
         list_frame.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 12))
-        listbox = tk.Listbox(
+        res_text = tk.Text(
             list_frame, bg=t["list_bg"], fg=t["list_fg"],
-            selectbackground=t["list_select_bg"],
-            selectforeground=t["list_select_fg"],
-            font=(SYSTEM_FONT, uf), relief=tk.FLAT, activestyle="none",
-            highlightthickness=1, highlightbackground=t["border"])
-        sb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=listbox.yview,
+            font=(SYSTEM_FONT, uf), relief=tk.FLAT, cursor="arrow",
+            highlightthickness=1, highlightbackground=t["border"],
+            spacing1=5, spacing3=5, wrap="none", takefocus=0,
+            padx=4, state=tk.DISABLED)
+        sb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=res_text.yview,
                            style="Visible.Vertical.TScrollbar")
-        listbox.config(yscrollcommand=sb.set)
+        res_text.config(yscrollcommand=sb.set)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
-        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        res_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Result-row styling: notebook name in accent, hovered/selected row
+        # tinted, matched query substring highlighted. Configure order matters:
+        # later tags take background priority (match > active > hover).
+        res_text.tag_configure("r_nb", foreground=t["accent"],
+                               font=(SYSTEM_FONT, uf, "bold"))
+        res_text.tag_configure("r_dim", foreground=t["fg_dim"])
+        res_text.tag_configure("r_hover", background=t["bg_tertiary"])
+        res_text.tag_configure(
+            "r_active", background=self._blend(t["list_bg"], t["accent"], 0.18))
+        res_text.tag_configure(
+            "r_match", background=self._blend(t["list_bg"], t["accent"], 0.38))
 
         results = []   # [(notebook, occurrence_idx, preview), ...]
+        sel_idx = [0]
         timer = [None]
         marker_re = re.compile(
             r'\[(?:IMAGE|FILE):[^\]]+\]|\[/?(?:STRIKE|HL)(?::\w+)?\]')
         MAX_RESULTS = 300
 
+        def update_active(see=True):
+            res_text.tag_remove("r_active", "1.0", tk.END)
+            if results:
+                line = sel_idx[0] + 1
+                res_text.tag_add("r_active", f"{line}.0", f"{line + 1}.0")
+                if see:
+                    res_text.see(f"{line}.0")
+
+        def render():
+            q = entry_var.get().strip().lower()
+            res_text.configure(state=tk.NORMAL)
+            res_text.delete("1.0", tk.END)
+            for nb, _occ, preview in results:
+                res_text.insert(tk.END, f" {nb}", "r_nb")
+                res_text.insert(tk.END, "  ·  ", "r_dim")
+                preview_lower = preview.lower()
+                pos = 0
+                if q:
+                    while True:
+                        j = preview_lower.find(q, pos)
+                        if j == -1:
+                            break
+                        if j > pos:
+                            res_text.insert(tk.END, preview[pos:j])
+                        res_text.insert(tk.END, preview[j:j + len(q)], "r_match")
+                        pos = j + len(q)
+                res_text.insert(tk.END, preview[pos:] + "\n")
+            res_text.configure(state=tk.DISABLED)
+            sel_idx[0] = 0
+            update_active(see=False)
+
         def do_search():
             timer[0] = None
             query = entry_var.get().strip()
-            listbox.delete(0, tk.END)
             results.clear()
             if not query:
                 count_lbl.configure(text="")
+                render()
                 return
             q = query.lower()
             for nb in self.get_notebooks_list():
@@ -5960,14 +6113,12 @@ mark.hl-purple { background: #e6d4f7; }
                                        + snippet[start:start + 100] + "…")
                         preview = marker_re.sub('📎', snippet).strip()
                         results.append((nb, occ, preview))
-                        listbox.insert(tk.END, f" {nb}  ·  {preview}")
                     occ += cnt
                 if len(results) >= MAX_RESULTS:
                     break
             count_lbl.configure(
                 text=self.tr("global_results_n").format(len(results)))
-            if results:
-                listbox.selection_set(0)
+            render()
 
         def schedule(*_):
             if timer[0] is not None:
@@ -5977,10 +6128,9 @@ mark.hl-purple { background: #e6d4f7; }
         entry_var.trace_add("write", schedule)
 
         def jump(event=None):
-            sel = listbox.curselection()
-            if not sel or not results:
+            if not results:
                 return "break"
-            nb, occ, _preview = results[sel[0]]
+            nb, occ, _preview = results[sel_idx[0]]
             query = entry_var.get().strip()
             dialog.destroy()
             self._global_search_jump(nb, query, occ)
@@ -5989,18 +6139,34 @@ mark.hl-purple { background: #e6d4f7; }
         def move_sel(delta):
             if not results:
                 return "break"
-            cur = listbox.curselection()
-            i = (cur[0] + delta) % len(results) if cur else 0
-            listbox.selection_clear(0, tk.END)
-            listbox.selection_set(i)
-            listbox.see(i)
+            sel_idx[0] = (sel_idx[0] + delta) % len(results)
+            update_active()
             return "break"
 
+        def on_motion(e):
+            res_text.tag_remove("r_hover", "1.0", tk.END)
+            if not results:
+                return
+            line = int(res_text.index(f"@{e.x},{e.y}").split('.')[0])
+            if 1 <= line <= len(results):
+                res_text.tag_add("r_hover", f"{line}.0", f"{line + 1}.0")
+
+        def on_click(e):
+            if not results:
+                return "break"
+            line = int(res_text.index(f"@{e.x},{e.y}").split('.')[0])
+            if 1 <= line <= len(results):
+                sel_idx[0] = line - 1
+                jump()
+            return "break"
+
+        res_text.bind("<Motion>", on_motion)
+        res_text.bind("<Leave>",
+                      lambda e: res_text.tag_remove("r_hover", "1.0", tk.END))
+        res_text.bind("<Button-1>", on_click)
         entry.bind("<Down>", lambda e: move_sel(1))
         entry.bind("<Up>", lambda e: move_sel(-1))
         entry.bind("<Return>", jump)
-        listbox.bind("<Return>", jump)
-        listbox.bind("<Double-Button-1>", jump)
         dialog.bind("<Escape>", lambda e: dialog.destroy())
 
         # Drag the borderless window by its header
