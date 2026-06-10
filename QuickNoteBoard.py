@@ -678,14 +678,32 @@ class NoteApp:
         search_frame = tk.Frame(self.sidebar_frame, bg=t["bg"])
         search_frame.pack(fill=tk.X, padx=5, pady=5)
         _search_icon = "\U0001f50d" if not _IS_LINUX else "\u641c"
-        tk.Label(search_frame, text=_search_icon, bg=t["bg"], fg=t["fg"]).pack(side=tk.LEFT)
+        self._nb_search_box = tk.Frame(
+            search_frame, bg=t["entry_bg"], highlightthickness=1,
+            highlightbackground=t["border"], highlightcolor=t["accent"])
+        self._nb_search_box.pack(fill=tk.X)
+        self._nb_search_icon = tk.Label(
+            self._nb_search_box, text=_search_icon, bg=t["entry_bg"],
+            fg=t["fg_dim"], font=(SYSTEM_FONT, max(10, self.ui_font_size - 3)))
+        self._nb_search_icon.pack(side=tk.LEFT, padx=(7, 0))
         self.notebook_search_var = tk.StringVar()
         self.notebook_search_var.trace_add("write", self.on_notebook_search_changed)
-        self.notebook_search_entry = ttk.Entry(search_frame, textvariable=self.notebook_search_var,
-                                                width=15, style="Sidebar.TEntry")
-        self.notebook_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+        self.notebook_search_entry = tk.Entry(
+            self._nb_search_box, textvariable=self.notebook_search_var,
+            bg=t["entry_bg"], fg=t["entry_fg"], relief=tk.FLAT,
+            insertbackground=t["text_insert"], highlightthickness=0,
+            font=(SYSTEM_FONT, self.ui_font_size))
+        self.notebook_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                                        padx=(5, 6), ipady=4)
         self._attach_placeholder(self.notebook_search_entry,
                                  self.notebook_search_var, "search_placeholder")
+        # \u805a\u7126\u65f6\u8fb9\u6846\u7531 border \u53d8\u4e3a\u4e3b\u9898\u8272
+        self.notebook_search_entry.bind(
+            "<FocusIn>", lambda e: self._nb_search_box.configure(
+                highlightbackground=self.current_theme_colors["accent"]))
+        self.notebook_search_entry.bind(
+            "<FocusOut>", lambda e: self._nb_search_box.configure(
+                highlightbackground=self.current_theme_colors["border"]))
 
         # 笔记本列表
         list_frame = tk.Frame(self.sidebar_frame, bg=t["bg"])
@@ -956,6 +974,16 @@ class NoteApp:
         # Notebook list colors/rowheight are driven by the "Sidebar.Treeview"
         # ttk style, already refreshed via setup_ttk_styles() above.
 
+        # Sidebar search pill (repainted to bg by _theme_frame_children above)
+        if hasattr(self, '_nb_search_box'):
+            self._nb_search_box.configure(bg=t["entry_bg"],
+                                          highlightbackground=t["border"],
+                                          highlightcolor=t["accent"])
+            self._nb_search_icon.configure(bg=t["entry_bg"], fg=t["fg_dim"])
+            self.notebook_search_entry.configure(
+                bg=t["entry_bg"], fg=t["entry_fg"],
+                insertbackground=t["text_insert"])
+
         # Main paned window
         if hasattr(self, 'main_paned'):
             self.main_paned.configure(bg=t["paned_sash"], sashrelief=tk.FLAT)
@@ -1137,9 +1165,12 @@ class NoteApp:
         the entry has content. Theme- and language-aware via
         self._placeholder_labels."""
         t = self.current_theme_colors
+        # ttk widgets report an empty font (it lives in the style) — fall back
+        # to the UI font so the placeholder aligns with the entry text.
+        entry_font = entry.cget("font") or (SYSTEM_FONT, self.ui_font_size)
         lbl = tk.Label(entry, text=self.tr(text_key),
                        bg=t["entry_bg"], fg=t["fg_placeholder"],
-                       font=entry.cget("font"), cursor="xterm")
+                       font=entry_font, cursor="xterm")
         lbl._i18n_key = text_key
         lbl.bind("<Button-1>", lambda e: entry.focus_set())
 
@@ -4986,8 +5017,13 @@ mark.hl-purple { background: #e6d4f7; }
 
         tk.Label(dialog, text=self.tr("nb_name_label"), bg=t["bg"], fg=t["fg"],
                  font=(SYSTEM_FONT, self.ui_font_size)).pack(pady=(10, 5))
-        entry = ttk.Entry(dialog, width=30, style="Sidebar.TEntry")
-        entry.pack(pady=5, padx=20)
+        entry = tk.Entry(dialog, width=30,
+                         bg=t["entry_bg"], fg=t["entry_fg"], relief=tk.FLAT,
+                         insertbackground=t["text_insert"],
+                         font=(SYSTEM_FONT, self.ui_font_size),
+                         highlightthickness=1, highlightbackground=t["border"],
+                         highlightcolor=t["accent"])
+        entry.pack(pady=5, padx=20, ipady=4)
         entry.focus_set()
 
         def do_save():
