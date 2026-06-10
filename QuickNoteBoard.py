@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk
 import os
+import time
 import json
 import shutil
 import zipfile
@@ -75,6 +76,30 @@ def _get_mono_font():
     return "DejaVu Sans Mono"
 
 MONO_FONT = _get_mono_font()
+
+
+def _atomic_write_text(path, content):
+    """Write text to *path* atomically: write a temp file in the same
+    directory, fsync, then os.replace. A crash mid-write can never leave a
+    truncated/corrupt file behind — the old content survives intact."""
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def _atomic_write_json(path, data, **dump_kwargs):
+    """Atomically serialize *data* as JSON to *path* (see _atomic_write_text)."""
+    _atomic_write_text(path, json.dumps(data, **dump_kwargs))
 
 # Linux X11 bitmap fonts cannot render emoji (U+1F000+) or many extended
 # Unicode symbols.  Provide plain-text fallbacks for Linux while keeping
@@ -186,7 +211,112 @@ _I18N = {
     "quit_confirm_msg":   ("确定要退出 Quick Note Board 吗？", "Quit Quick Note Board?"),
     # Language toggle button
     "lang_toggle":      ("EN", "中"),
+    # Save failure notification
+    "save_failed_msg":  ("保存笔记本 '{}' 失败：\n{}\n\n请检查磁盘空间和文件权限。",
+                         "Failed to save notebook '{}':\n{}\n\nCheck disk space and file permissions."),
+    # Find & replace
+    "replace_placeholder": ("替换为...", "Replace with..."),
+    "replace_btn":      ("替换", "Replace"),
+    "replace_all_btn":  ("全部替换", "Replace All"),
+    "replaced_n":       ("已替换 {} 处", "Replaced {}"),
+    # Global (cross-notebook) search
+    "global_search":    ("全局搜索...", "Search All Notebooks…"),
+    "global_search_title": ("全局搜索", "Global Search"),
+    "global_search_hint":  ("搜索所有笔记本...", "Search all notebooks..."),
+    "global_results_n": ("{} 个结果", "{} results"),
+    # Backup restore
+    "restore_backup":   ("恢复备份...", "Restore Backup…"),
+    "restore_title":    ("恢复备份 - {}", "Restore Backup - {}"),
+    "restore_btn":      ("恢复此备份", "Restore This Backup"),
+    "no_backups":       ("当前笔记本没有可用的备份", "No backups available for this notebook"),
+    "restore_confirm_msg": ("确定用该备份覆盖当前内容吗？\n当前内容会先自动备份一份。",
+                            "Replace current content with this backup?\nCurrent content will be backed up first."),
+    # Export formats
+    "export_md":        ("导出为 Markdown...", "Export as Markdown…"),
+    "export_html":      ("导出为 HTML...", "Export as HTML…"),
+    # Word count status bar
+    "wc_stats":         ("字数 {}  ·  字符 {}", "{} words  ·  {} chars"),
+    "wc_stats_sel":     ("选中：字数 {}  ·  字符 {}", "Selected: {} words  ·  {} chars"),
 }
+
+# ── Lightweight code-block syntax highlighting (stdlib only) ──────────
+_SYN_KEYWORDS = {
+    'python': frozenset(("def class return if elif else for while in not and or is "
+                         "None True False import from as with try except finally "
+                         "raise lambda yield global nonlocal pass break continue "
+                         "del assert async await self match case").split()),
+    'js': frozenset(("function var let const return if else for while do switch "
+                     "case break continue new delete typeof instanceof in of class "
+                     "extends super this null undefined true false import export "
+                     "from default try catch finally throw async await yield "
+                     "static get set void").split()),
+    'c': frozenset(("int char long short float double void unsigned signed struct "
+                    "union enum typedef static const return if else for while do "
+                    "switch case break continue sizeof goto extern volatile inline "
+                    "bool true false NULL nullptr class public private protected "
+                    "virtual template typename namespace using new delete auto "
+                    "final override package boolean String byte implements extends "
+                    "interface abstract synchronized throws throw try catch finally "
+                    "import this super instanceof").split()),
+    'go': frozenset(("func package import var const type struct interface map chan "
+                     "go defer return if else for range switch case break continue "
+                     "select fallthrough goto nil true false make new len cap "
+                     "append string int bool byte rune error").split()),
+    'rust': frozenset(("fn let mut const static struct enum impl trait for while "
+                       "loop if else match return use mod pub crate self super "
+                       "where async await move ref dyn Box Vec Some None Ok Err "
+                       "true false String str u8 u32 u64 i32 i64 f32 f64 usize "
+                       "bool unsafe").split()),
+    'shell': frozenset(("if then else elif fi for while do done case esac function "
+                        "return exit echo export local read source set unset shift "
+                        "break continue in").split()),
+    'sql': frozenset(("select from where insert into values update set delete "
+                      "create table drop alter index join left right inner outer "
+                      "on group by order having limit offset union all distinct "
+                      "as and or not null primary key foreign references "
+                      "SELECT FROM WHERE INSERT INTO VALUES UPDATE SET DELETE "
+                      "CREATE TABLE DROP ALTER INDEX JOIN LEFT RIGHT INNER OUTER "
+                      "ON GROUP BY ORDER HAVING LIMIT OFFSET UNION ALL DISTINCT "
+                      "AS AND OR NOT NULL PRIMARY KEY FOREIGN REFERENCES").split()),
+    'json': frozenset("true false null".split()),
+    'ruby': frozenset(("def end class module if elsif else unless while until for "
+                       "in do return yield begin rescue ensure raise require puts "
+                       "nil true false self super lambda proc attr_accessor "
+                       "attr_reader").split()),
+    'swift': frozenset(("func var let class struct enum protocol extension if else "
+                        "guard switch case for while repeat return import nil true "
+                        "false self super init deinit throws try catch defer where "
+                        "as is in inout lazy weak static public private internal "
+                        "open final override mutating").split()),
+}
+_SYN_ALIASES = {
+    'py': 'python', 'python3': 'python',
+    'javascript': 'js', 'ts': 'js', 'typescript': 'js', 'jsx': 'js',
+    'tsx': 'js', 'node': 'js',
+    'c++': 'c', 'cpp': 'c', 'cc': 'c', 'h': 'c', 'hpp': 'c', 'java': 'c',
+    'cs': 'c', 'c#': 'c', 'kotlin': 'c', 'kt': 'c', 'objc': 'c',
+    'golang': 'go',
+    'rs': 'rust',
+    'sh': 'shell', 'bash': 'shell', 'zsh': 'shell',
+    'rb': 'ruby',
+    'mysql': 'sql', 'postgres': 'sql', 'postgresql': 'sql', 'sqlite': 'sql',
+}
+_SYN_COMMENTS = {
+    'python': '#', 'shell': '#', 'ruby': '#',
+    'js': '//', 'c': '//', 'go': '//', 'rust': '//', 'swift': '//',
+    'sql': '--', 'json': None,
+}
+_SYN_STR_RE = re.compile(
+    r'"(?:[^"\\]|\\.)*"'
+    r"|'(?:[^'\\]|\\.)*'"
+    r'|`[^`]*`')
+_SYN_TOKEN_RE = re.compile(
+    r'(?P<str>"(?:[^"\\]|\\.)*"'
+    r"|'(?:[^'\\]|\\.)*'"
+    r'|`[^`]*`)'
+    r'|(?P<word>[A-Za-z_][A-Za-z0-9_]*)'
+    r'|(?P<num>\b\d+(?:\.\d+)?\b)')
+
 
 class NoteApp:
     # ── Theme Definitions (Catppuccin-inspired) ──────────────────────────
@@ -617,6 +747,15 @@ class NoteApp:
                    command=self.recycle_note, style="Toolbar.TButton")
         self._btn_recycle.pack(side=tk.LEFT, padx=5)
 
+        # 状态栏：字数统计（packed BOTTOM first so text_container fills the rest）
+        self._status_bar = tk.Frame(self.right_content, bg=t["bg"])
+        self._status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        self._wordcount_label = tk.Label(
+            self._status_bar, text="", anchor="e", bg=t["bg"], fg=t["fg_dim"],
+            font=(SYSTEM_FONT, max(10, self.ui_font_size - 3)))
+        self._wordcount_label.pack(side=tk.RIGHT, padx=8, pady=(0, 2))
+        self._wc_timer_id = None
+
         # 文本区域容器 (包含文本和滚动条)
         self.text_container = tk.Frame(self.right_content, bg=t["bg"])
         self.text_container.pack(fill=tk.BOTH, expand=True, pady=5)
@@ -840,6 +979,11 @@ class NoteApp:
         if hasattr(self, 'text_container'):
             self.text_container.configure(bg=t["bg"])
 
+        # Word count status bar
+        if hasattr(self, '_wordcount_label'):
+            self._status_bar.configure(bg=t["bg"])
+            self._wordcount_label.configure(bg=t["bg"], fg=t["fg_dim"])
+
         # Update text tags
         self._update_text_tags()
 
@@ -862,8 +1006,13 @@ class NoteApp:
                                           highlightcolor=t["accent"],
                                           highlightbackground=t["border"])
             self._search_count_label.configure(bg=t["bg_secondary"], fg=t["fg_dim"])
-            for btn in (self._search_prev_btn, self._search_next_btn, self._search_close_btn):
+            for btn in (self._search_prev_btn, self._search_next_btn, self._search_close_btn,
+                        self._replace_btn, self._replace_all_btn):
                 btn.configure(bg=t["bg_secondary"], fg=t["fg_dim"])
+            self._replace_entry.configure(bg=t["entry_bg"], fg=t["entry_fg"],
+                                           insertbackground=t["text_insert"],
+                                           highlightcolor=t["accent"],
+                                           highlightbackground=t["border"])
             self.text_area.tag_configure("search_match",
                                           background=t["accent"] if self.current_theme == "dark" else "#b4d5fe",
                                           foreground="#ffffff" if self.current_theme == "dark" else "#1e1e2e")
@@ -942,6 +1091,13 @@ class NoteApp:
         # Outline panel (if created)
         if hasattr(self, "outline_title"):
             self.outline_title.configure(text=self.tr("outline_title"))
+        # Search bar replace buttons (if created)
+        if hasattr(self, "_replace_btn"):
+            self._replace_btn.configure(text=self.tr("replace_btn"))
+            self._replace_all_btn.configure(text=self.tr("replace_all_btn"))
+        # Word count status bar (if created)
+        if hasattr(self, "_wordcount_label"):
+            self._update_word_count()
 
     def toggle_theme(self):
         """Switch between dark and light themes."""
@@ -982,7 +1138,7 @@ class NoteApp:
         try:
             self.text_area.tag_configure("strikethrough",
                                          overstrike=True, foreground=t["fg_dim"])
-        except:
+        except Exception:
             pass
         # Highlight colors. spacing1/spacing3=0 so the colored block hugs the
         # text instead of extending into the inter-line spacing above/below.
@@ -991,7 +1147,7 @@ class NoteApp:
                 self.text_area.tag_configure(f"highlight_{color}",
                                              background=t[f"hl_{color}"],
                                              spacing1=0, spacing3=0)
-            except:
+            except Exception:
                 pass
         # File link tags
         for tag in self.text_area.tag_names():
@@ -1008,7 +1164,7 @@ class NoteApp:
                     self.text_area.tag_config(tag, foreground=t["accent_url"])
                 elif tag.startswith("icon_"):
                     self.text_area.tag_config(tag, font=(SYSTEM_FONT, self.icon_font_size))
-            except:
+            except Exception:
                 pass
         # Update markdown tag styles
         self._update_markdown_tag_styles()
@@ -1044,10 +1200,10 @@ class NoteApp:
                 with open(self.json_history_file, "r", encoding="utf-8") as f:
                     history_data = json.load(f)
                 
-                with open(self.history_file, "w", encoding="utf-8") as f:
-                    for item in history_data:
-                        f.write(f"--- {item['timestamp']} ---\n")
-                        f.write(f"{item['content']}\n\n")
+                migrated = "".join(
+                    f"--- {item['timestamp']} ---\n{item['content']}\n\n"
+                    for item in history_data)
+                _atomic_write_text(self.history_file, migrated)
                 
                 # Optional: Remove old file or rename it
                 # os.remove(self.json_history_file) 
@@ -1075,8 +1231,7 @@ class NoteApp:
                 print(f"Error reading history: {e}")
 
         try:
-            with open(self.history_file, "w", encoding="utf-8") as f:
-                f.write(new_entry + existing_content)
+            _atomic_write_text(self.history_file, new_entry + existing_content)
         except Exception as e:
             print(f"Error saving history: {e}")
 
@@ -1116,8 +1271,7 @@ class NoteApp:
         def on_history_close():
             try:
                 content = text_widget.get("1.0", "end-1c")
-                with open(self.history_file, "w", encoding="utf-8") as f:
-                    f.write(content)
+                _atomic_write_text(self.history_file, content)
             except Exception as e:
                 print(f"Error saving history on close: {e}")
             history_window.destroy()
@@ -1353,8 +1507,8 @@ class NoteApp:
                 "order": self.notebook_order,
                 "shortcuts": self.notebook_shortcuts
             }
-            with open(self.notebook_order_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            _atomic_write_json(self.notebook_order_file, data,
+                               ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"Error saving notebook order: {e}")
 
@@ -1731,7 +1885,7 @@ class NoteApp:
                     v.lift()
                     v.focus_force()
                     return
-            except:
+            except Exception:
                 pass
         self._notebook_viewers = [v for v in self._notebook_viewers
                                   if v.winfo_exists()]
@@ -2020,13 +2174,12 @@ class NoteApp:
         try:
             if not viewer.winfo_exists():
                 return
-        except:
+        except Exception:
             return
         try:
             content = self._viewer_get_content(viewer)
             note_path = os.path.join(self.notebooks_dir, viewer._nb_name, self.note_file)
-            with open(note_path, "w", encoding="utf-8") as f:
-                f.write(content)
+            _atomic_write_text(note_path, content)
         except Exception as e:
             print(f"Error saving viewer {viewer._nb_name}: {e}")
             import traceback
@@ -2037,7 +2190,7 @@ class NoteApp:
         try:
             if not viewer.winfo_exists():
                 return
-        except:
+        except Exception:
             return
         # Apply basic markdown tags directly on the viewer text widget
         vt = viewer._nb_text
@@ -2098,7 +2251,7 @@ class NoteApp:
         try:
             if not viewer.winfo_exists():
                 return
-        except:
+        except Exception:
             return
         # Save viewer content to disk
         self._viewer_save(viewer)
@@ -2211,9 +2364,14 @@ class NoteApp:
         menu.add_command(label=self.tr("delete_cur_nb"), command=self.delete_notebook)
         menu.add_separator()
         menu.add_command(label=self.tr("sort_manage"), command=self.show_notebook_order_dialog)
+        menu.add_command(label=self.tr("global_search"), command=self.show_global_search)
         menu.add_separator()
         menu.add_command(label=self.tr("export_nb"), command=self.export_notebook)
+        menu.add_command(label=self.tr("export_md"), command=self.export_notebook_markdown)
+        menu.add_command(label=self.tr("export_html"), command=self.export_notebook_html)
         menu.add_command(label=self.tr("import_nb"), command=self.import_notebook)
+        menu.add_separator()
+        menu.add_command(label=self.tr("restore_backup"), command=self.show_restore_backup_dialog)
 
         try:
             menu.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
@@ -2234,7 +2392,7 @@ class NoteApp:
                 if viewer.winfo_exists() and viewer._nb_name == notebook_name:
                     self._viewer_save(viewer)
                     break
-            except:
+            except Exception:
                 pass
 
         # Remember previous notebook for quick switch
@@ -2305,6 +2463,10 @@ class NoteApp:
             self._fast_load_mode = False
             # Re-show text area (before scrollbar so it fills correctly)
             self.text_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # The tag_delete above wiped both the styling and the bindings of all
+        # md_ tags; the load re-added them unconfigured. Restore styles/binds.
+        self._update_markdown_tag_styles()
 
         # Reset state after loading
         self.last_saved_content = loaded_content
@@ -2794,6 +2956,395 @@ class NoteApp:
             messagebox.showerror(self.tr("warning"), self.tr("import_err").format(str(e)),
                                  parent=self.root)
 
+    def _show_export_done(self, out_path):
+        """Small themed confirmation dialog after a successful export."""
+        t = self.current_theme_colors
+        dialog = tk.Toplevel(self.root)
+        dialog.title(self.tr("export_nb"))
+        dialog.geometry("420x110")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.configure(bg=t["bg"])
+        tk.Label(dialog, text=self.tr("export_ok").format(out_path),
+                 bg=t["bg"], fg=t["fg"], font=(SYSTEM_FONT, self.ui_font_size),
+                 wraplength=380, justify="center").pack(pady=(15, 5))
+        ttk.Button(dialog, text=self.tr("confirm"), command=dialog.destroy,
+                   style="Toolbar.TButton").pack(pady=5)
+
+    def export_notebook_markdown(self):
+        """Export the current notebook as a standard .md file. Referenced
+        attachments are copied to a sibling \"<name>_attachments\" folder and
+        links in the markdown point there."""
+        from tkinter import filedialog
+        import tkinter.messagebox as messagebox
+        self.save_notes(quick=True)
+        content = self.get_content_with_markers()
+        out_path = filedialog.asksaveasfilename(
+            title=self.tr("export_md"),
+            initialfile=f"{self.current_notebook}.md",
+            defaultextension=".md",
+            filetypes=[("Markdown", "*.md")],
+            parent=self.root)
+        if not out_path:
+            return
+        try:
+            used_files = []
+
+            def img_repl(m):
+                fn = m.group(1)
+                used_files.append(fn)
+                name = self.get_display_name(fn)
+                return f"![{name}](__ATTACH_DIR__/{fn})"
+
+            def file_repl(m):
+                fn = m.group(1)
+                used_files.append(fn)
+                name = self.get_display_name(fn)
+                return f"[{name}](__ATTACH_DIR__/{fn})"
+
+            md = re.sub(r'\[IMAGE:([^:\]]+)(?::\d+)?\]', img_repl, content)
+            md = re.sub(r'\[FILE:([^\]]+)\]', file_repl, md)
+            md = md.replace('[STRIKE]', '~~').replace('[/STRIKE]', '~~')
+            md = re.sub(r'\[HL:\w+\]', '==', md).replace('[/HL]', '==')
+
+            if used_files:
+                base = os.path.splitext(os.path.basename(out_path))[0]
+                attach_dirname = f"{base}_attachments"
+                attach_dir = os.path.join(os.path.dirname(out_path), attach_dirname)
+                os.makedirs(attach_dir, exist_ok=True)
+                src_dir = self.get_attachments_path()
+                for fn in set(used_files):
+                    src = os.path.join(src_dir, fn)
+                    if os.path.exists(src):
+                        shutil.copy2(src, os.path.join(attach_dir, fn))
+                md = md.replace("__ATTACH_DIR__", attach_dirname)
+
+            _atomic_write_text(out_path, md)
+            self._show_export_done(out_path)
+        except Exception as e:
+            messagebox.showerror(self.tr("warning"), str(e), parent=self.root)
+
+    def export_notebook_html(self):
+        """Export the current notebook as a self-contained .html file with
+        rendered markdown and base64-embedded images."""
+        from tkinter import filedialog
+        import tkinter.messagebox as messagebox
+        self.save_notes(quick=True)
+        content = self.get_content_with_markers()
+        out_path = filedialog.asksaveasfilename(
+            title=self.tr("export_html"),
+            initialfile=f"{self.current_notebook}.html",
+            defaultextension=".html",
+            filetypes=[("HTML", "*.html")],
+            parent=self.root)
+        if not out_path:
+            return
+        try:
+            _atomic_write_text(out_path, self._convert_content_to_html(content))
+            self._show_export_done(out_path)
+        except Exception as e:
+            messagebox.showerror(self.tr("warning"), str(e), parent=self.root)
+
+    def _inline_md_to_html(self, s):
+        """Convert inline markdown (code, bold, italic, URLs) in an
+        already-HTML-escaped string."""
+        s = re.sub(r'(?<!`)`([^`]+)`(?!`)', r'<code>\1</code>', s)
+        s = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', s)
+        s = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<i>\1</i>', s)
+        s = re.sub(r'(https?://[^\s<>&quot;]+)', r'<a href="\1">\1</a>', s)
+        return s
+
+    def _convert_content_to_html(self, content):
+        """Render note content (with markers) to a standalone HTML document."""
+        import base64
+        attach_dir = self.get_attachments_path()
+
+        esc = html.escape(content)
+
+        # Inline-span markers → HTML
+        esc = esc.replace('[STRIKE]', '<s>').replace('[/STRIKE]', '</s>')
+        esc = re.sub(r'\[HL:(\w+)\]', r'<mark class="hl-\1">', esc)
+        esc = esc.replace('[/HL]', '</mark>')
+
+        def img_repl(m):
+            fn, width = m.group(1), m.group(2)
+            path = os.path.join(attach_dir, fn)
+            if not os.path.exists(path):
+                return m.group(0)
+            ext = os.path.splitext(fn)[1].lower().lstrip('.')
+            mime = {'jpg': 'jpeg', 'jpeg': 'jpeg', 'png': 'png', 'gif': 'gif',
+                    'webp': 'webp', 'bmp': 'bmp'}.get(ext, 'png')
+            try:
+                with open(path, 'rb') as f:
+                    b64 = base64.b64encode(f.read()).decode('ascii')
+            except OSError:
+                return m.group(0)
+            w = f' width="{width}"' if width else ''
+            alt = html.escape(self.get_display_name(fn), quote=True)
+            return f'<img src="data:image/{mime};base64,{b64}" alt="{alt}"{w}>'
+
+        esc = re.sub(r'\[IMAGE:([^:\]]+)(?::(\d+))?\]', img_repl, esc)
+        esc = re.sub(
+            r'\[FILE:([^\]]+)\]',
+            lambda m: ('<span class="file">📎 '
+                       f'{html.escape(self.get_display_name(m.group(1)))}</span>'),
+            esc)
+
+        out = []
+        in_code = False
+        list_mode = [None]  # None | 'ul' | 'ol'
+
+        def close_list():
+            if list_mode[0]:
+                out.append(f"</{list_mode[0]}>")
+                list_mode[0] = None
+
+        def open_list(kind):
+            if list_mode[0] != kind:
+                close_list()
+                out.append(f"<{kind}>")
+                list_mode[0] = kind
+
+        for line in esc.split('\n'):
+            stripped = line.strip()
+            if stripped.startswith('```'):
+                close_list()
+                out.append('</code></pre>' if in_code else '<pre><code>')
+                in_code = not in_code
+                continue
+            if in_code:
+                out.append(line)
+                continue
+            if (len(stripped) >= 3
+                    and re.match(r'^([-*_])\s*\1\s*\1[\s\-*_]*$', stripped)):
+                close_list()
+                out.append('<hr>')
+                continue
+            h = re.match(r'^(#{1,3})\s+(.+)', line)
+            if h:
+                close_list()
+                lvl = len(h.group(1))
+                out.append(f'<h{lvl}>{self._inline_md_to_html(h.group(2))}</h{lvl}>')
+                continue
+            bq = re.match(r'^&gt;\s?(.*)', line)  # '>' is escaped at this point
+            if bq:
+                close_list()
+                out.append(f'<blockquote>{self._inline_md_to_html(bq.group(1))}</blockquote>')
+                continue
+            task = re.match(r'^\s*[-*] \[([ xX])\]\s?(.*)', line)
+            if task:
+                open_list('ul')
+                checked = ' checked' if task.group(1) in 'xX' else ''
+                cls = ' class="done"' if checked else ''
+                out.append(f'<li class="task"><input type="checkbox" disabled{checked}> '
+                           f'<span{cls}>{self._inline_md_to_html(task.group(2))}</span></li>')
+                continue
+            li = re.match(r'^\s*[-*]\s+(.*)', line)
+            if li:
+                open_list('ul')
+                out.append(f'<li>{self._inline_md_to_html(li.group(1))}</li>')
+                continue
+            ol = re.match(r'^\s*(\d+)\.\s+(.*)', line)
+            if ol:
+                open_list('ol')
+                out.append(f'<li>{self._inline_md_to_html(ol.group(2))}</li>')
+                continue
+            close_list()
+            if stripped:
+                out.append(f'<p>{self._inline_md_to_html(line)}</p>')
+
+        if in_code:
+            out.append('</code></pre>')
+        close_list()
+
+        css = """
+body { margin: 0; background: #f6f8fa; color: #1f2328;
+       font: 16px/1.65 -apple-system, 'Segoe UI', 'Noto Sans CJK SC', sans-serif; }
+main { max-width: 760px; margin: 0 auto; padding: 40px 24px;
+       background: #ffffff; min-height: 100vh; box-sizing: border-box; }
+h1, h2, h3 { line-height: 1.3; }
+img { max-width: 100%; height: auto; border-radius: 6px; }
+pre { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px;
+      padding: 12px; overflow-x: auto; }
+code { font-family: Menlo, Consolas, monospace; font-size: 0.9em;
+       background: #f0f1f3; border-radius: 4px; padding: 1px 4px; }
+pre code { background: none; padding: 0; }
+blockquote { margin: 0; padding: 2px 14px; border-left: 4px solid #d0d7de;
+             color: #57606a; }
+p { margin: 6px 0; }
+hr { border: none; border-top: 2px solid #d8dee4; margin: 18px 0; }
+a { color: #0969da; }
+.file { color: #1a7f37; }
+li.task { list-style: none; margin-left: -20px; }
+li.task .done { color: #8b949e; text-decoration: line-through; }
+mark.hl-green  { background: #aceebb; }
+mark.hl-yellow { background: #fff8c5; }
+mark.hl-red    { background: #ffcecb; }
+mark.hl-orange { background: #ffd8b5; }
+mark.hl-purple { background: #e6d4f7; }
+"""
+        title = html.escape(self.current_notebook)
+        body = "\n".join(out)
+        return ("<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
+                f"<title>{title}</title>\n<style>{css}</style>\n</head>\n"
+                f"<body>\n<main>\n<h1>{title}</h1>\n{body}\n</main>\n</body>\n</html>\n")
+
+    # ── Backup Restore ───────────────────────────────────────────────────
+
+    def show_restore_backup_dialog(self):
+        """Browse this notebook's automatic backups, preview and restore one."""
+        import tkinter.messagebox as messagebox
+        t = self.current_theme_colors
+        uf = self.ui_font_size
+
+        backup_dir = "backups"
+        prefix = f"{self.current_notebook}_backup_"
+        try:
+            files = sorted(
+                (f for f in os.listdir(backup_dir)
+                 if f.startswith(prefix) and f.endswith(".txt")),
+                reverse=True)
+        except FileNotFoundError:
+            files = []
+        if not files:
+            messagebox.showinfo(
+                self.tr("restore_title").format(self.current_notebook),
+                self.tr("no_backups"), parent=self.root)
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.transient(self.root)
+        dialog.overrideredirect(True)
+        dialog.configure(bg=t["border"])
+        card = tk.Frame(dialog, bg=t["bg_secondary"])
+        card.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+
+        header = tk.Frame(card, bg=t["bg_secondary"])
+        header.pack(fill=tk.X, padx=14, pady=(12, 6))
+        title_lbl = tk.Label(header,
+                             text=self.tr("restore_title").format(self.current_notebook),
+                             bg=t["bg_secondary"], fg=t["fg"],
+                             font=(SYSTEM_FONT, uf + 1, "bold"))
+        title_lbl.pack(side=tk.LEFT)
+        close_btn = tk.Label(header, text="✕", bg=t["bg_secondary"], fg=t["fg_dim"],
+                             font=(SYSTEM_FONT, uf), cursor="hand2")
+        close_btn.pack(side=tk.RIGHT)
+        close_btn.bind("<Button-1>", lambda e: dialog.destroy())
+
+        body = tk.Frame(card, bg=t["bg_secondary"])
+        body.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 8))
+
+        listbox = tk.Listbox(
+            body, bg=t["list_bg"], fg=t["list_fg"],
+            selectbackground=t["list_select_bg"],
+            selectforeground=t["list_select_fg"],
+            font=(SYSTEM_FONT, uf), relief=tk.FLAT, activestyle="none",
+            highlightthickness=1, highlightbackground=t["border"],
+            exportselection=False, height=len(files))
+        listbox.pack(fill=tk.X)
+
+        for fname in files:
+            stamp = fname[len(prefix):-4]
+            try:
+                shown = datetime.strptime(stamp, "%Y%m%d_%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                shown = stamp
+            try:
+                size_kb = os.path.getsize(os.path.join(backup_dir, fname)) / 1024
+                shown += f"   ·   {size_kb:.1f} KB"
+            except OSError:
+                pass
+            listbox.insert(tk.END, f" {shown}")
+
+        preview = tk.Text(
+            body, height=12, wrap=tk.WORD, state=tk.DISABLED,
+            font=(SYSTEM_FONT, max(10, uf - 1)),
+            bg=t["text_bg"], fg=t["fg_dim"], relief=tk.FLAT,
+            highlightthickness=1, highlightbackground=t["border"])
+        preview.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+
+        def show_preview(event=None):
+            sel = listbox.curselection()
+            if not sel:
+                return
+            try:
+                with open(os.path.join(backup_dir, files[sel[0]]),
+                          "r", encoding="utf-8") as f:
+                    text = f.read(4000)
+            except Exception as e:
+                text = str(e)
+            preview.configure(state=tk.NORMAL)
+            preview.delete("1.0", tk.END)
+            preview.insert("1.0", text)
+            preview.configure(state=tk.DISABLED)
+
+        listbox.bind("<<ListboxSelect>>", show_preview)
+        listbox.selection_set(0)
+        show_preview()
+
+        btns = tk.Frame(card, bg=t["bg_secondary"])
+        btns.pack(fill=tk.X, padx=14, pady=(0, 14))
+
+        def do_restore():
+            sel = listbox.curselection()
+            if not sel:
+                return
+            if not messagebox.askyesno(self.tr("restore_btn"),
+                                       self.tr("restore_confirm_msg"),
+                                       parent=dialog, default="no"):
+                return
+            try:
+                with open(os.path.join(backup_dir, files[sel[0]]),
+                          "r", encoding="utf-8") as f:
+                    content = f.read()
+            except Exception as e:
+                messagebox.showerror(self.tr("warning"), str(e), parent=dialog)
+                return
+            # Snapshot what we are about to replace: on-disk → backups/,
+            # editor state → undo stack (so Cmd+Z reverts the restore).
+            self.backup_notes()
+            self.save_undo_state()
+            dialog.destroy()
+            self.restore_content(content, "1.0")
+            self.content_modified = True
+            self.schedule_auto_save()
+
+        restore_btn = tk.Label(btns, text=self.tr("restore_btn"),
+                               bg=t["accent"], fg="#ffffff",
+                               font=(SYSTEM_FONT, uf, "bold"), cursor="hand2",
+                               padx=18, pady=7)
+        restore_btn.pack(side=tk.RIGHT)
+        restore_btn.bind("<Button-1>", lambda e: do_restore())
+
+        cancel = tk.Label(btns, text=self.tr("cancel"), bg=t["bg_tertiary"],
+                          fg=t["fg"], font=(SYSTEM_FONT, uf), cursor="hand2",
+                          padx=16, pady=7)
+        cancel.pack(side=tk.RIGHT, padx=(0, 8))
+        cancel.bind("<Button-1>", lambda e: dialog.destroy())
+
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
+
+        # Drag by header
+        drag = {"x": 0, "y": 0}
+        def start_drag(e):
+            drag["x"], drag["y"] = e.x, e.y
+        def do_drag(e):
+            dialog.geometry(f"+{e.x_root - drag['x']}+{e.y_root - drag['y']}")
+        for w in (header, title_lbl):
+            w.bind("<Button-1>", start_drag)
+            w.bind("<B1-Motion>", do_drag)
+
+        dialog.update_idletasks()
+        w = max(560, dialog.winfo_reqwidth())
+        h = max(480, dialog.winfo_reqheight())
+        px, py = self.root.winfo_rootx(), self.root.winfo_rooty()
+        pw, ph = self.root.winfo_width(), self.root.winfo_height()
+        dialog.geometry(f"{w}x{h}+{px + (pw - w) // 2}+{py + max(0, (ph - h) // 3)}")
+        dialog.lift()
+        dialog.attributes("-topmost", True)
+        dialog.grab_set()
+        dialog.focus_force()
+
     def indent_text(self):
         """Indent selected lines or current line by 4 spaces"""
         # Check if there's a selection
@@ -2997,8 +3548,7 @@ class NoteApp:
             "language": self.language
         }
         try:
-            with open(self.config_file, "w", encoding="utf-8") as f:
-                json.dump(config, f)
+            _atomic_write_json(self.config_file, config)
         except Exception as e:
             print(f"Error saving config: {e}")
 
@@ -3205,8 +3755,7 @@ class NoteApp:
                 except Exception as e:
                     print(f"save_notes empty-guard error: {e}")
 
-            with open(note_path, "w", encoding="utf-8") as f:
-                f.write(content)
+            _atomic_write_text(note_path, content)
 
             # Update last_saved_content to prevent duplicate saves
             self.last_saved_content = content
@@ -3227,84 +3776,158 @@ class NoteApp:
                 print(f"Error refreshing notebook list after save: {e}")
         except Exception as e:
             print(f"Error saving notes: {e}")
+            self._notify_save_error(e)
+
+    def _notify_save_error(self, error):
+        """Surface a failed save to the user (throttled so a persistent disk
+        error doesn't pop a dialog on every 3-second auto-save)."""
+        import tkinter.messagebox as messagebox
+        now = time.monotonic()
+        last = getattr(self, '_last_save_error_time', 0)
+        if now - last < 30:
+            return
+        self._last_save_error_time = now
+        try:
+            messagebox.showerror(
+                self.tr("warning"),
+                self.tr("save_failed_msg").format(self.current_notebook, error),
+                parent=self.root)
+        except Exception:
+            pass
 
     def cleanup_unused_attachments(self, content):
-        """Remove attachments that are no longer referenced in notes"""
+        """Remove attachments that are no longer referenced in notes.
+
+        The referenced-file set is computed on the main thread (so it matches
+        the editor state at save time); the directory scan and deletions run
+        on a background thread to keep the UI responsive with large folders.
+        """
         try:
             # Find all referenced files in content
             # Support both [IMAGE:filename] and [IMAGE:filename:width] formats
-            import re
             image_refs = set(re.findall(r'\[IMAGE:([^:\]]+)(?::\d+)?\]', content))
             file_refs = set(re.findall(r'\[FILE:([^\]]+)\]', content))
             referenced_files = image_refs | file_refs
 
-            # Also check undo/redo stacks — files there may be needed for undo/redo
-            for stack_content, _ in self.undo_stack + self.redo_stack:
-                referenced_files.update(re.findall(r'\[IMAGE:([^:\]]+)(?::\d+)?\]', stack_content))
-                referenced_files.update(re.findall(r'\[FILE:([^\]]+)\]', stack_content))
+            # Also check undo/redo stacks — files there may be needed for
+            # undo/redo. Entries are heterogeneous tuples ((content, cursor),
+            # ("highlight", fn, fn), ("paste_range", s, e, marker)), so scan
+            # every string element instead of unpacking a fixed shape.
+            for entry in self.undo_stack + self.redo_stack:
+                for element in entry:
+                    if isinstance(element, str):
+                        referenced_files.update(re.findall(r'\[IMAGE:([^:\]]+)(?::\d+)?\]', element))
+                        referenced_files.update(re.findall(r'\[FILE:([^\]]+)\]', element))
 
-            # Get all files in attachments directory
             attachments_path = self.get_attachments_path()
             if not os.path.exists(attachments_path):
                 return
+            if getattr(self, '_attach_cleanup_running', False):
+                return
+            self._attach_cleanup_running = True
+            notebook = self.current_notebook
 
-            for filename in os.listdir(attachments_path):
-                # Skip special files
-                if filename.startswith('.') or filename == 'filename_map.json':
-                    continue
+            def _worker():
+                deleted = []
+                try:
+                    for filename in os.listdir(attachments_path):
+                        # Skip special files and thumbnail caches
+                        if filename.startswith('.') or filename == 'filename_map.json':
+                            continue
+                        if filename.startswith('_thumb_'):
+                            continue
+                        if filename in referenced_files:
+                            continue
+                        filepath = os.path.join(attachments_path, filename)
+                        try:
+                            # Spare very fresh files: an attachment pasted while
+                            # this worker runs is not in referenced_files yet
+                            if time.time() - os.path.getmtime(filepath) < 60:
+                                continue
+                            if os.path.isdir(filepath):
+                                shutil.rmtree(filepath)
+                            else:
+                                os.remove(filepath)
+                            deleted.append(filename)
+                            print(f"Removed unused attachment: {filename}")
 
-                # Skip thumbnail cache files (video and image thumbnails)
-                if filename.startswith('_thumb_'):
-                    continue
-
-                # If file is not referenced, delete it
-                if filename not in referenced_files:
-                    filepath = os.path.join(attachments_path, filename)
+                            # Remove associated video thumbnail cache
+                            thumb_cache = os.path.join(attachments_path, f"_thumb_{filename}.png")
+                            if os.path.exists(thumb_cache):
+                                os.remove(thumb_cache)
+                        except Exception as e:
+                            print(f"Error removing {filename}: {e}")
+                except Exception as e:
+                    print(f"Error cleaning up attachments: {e}")
+                finally:
                     try:
-                        if os.path.isdir(filepath):
-                            shutil.rmtree(filepath)
-                        else:
-                            os.remove(filepath)
-                        print(f"Removed unused attachment: {filename}")
+                        self.root.after(
+                            0, lambda: self._finish_attachment_cleanup(notebook, deleted))
+                    except Exception:
+                        self._attach_cleanup_running = False
 
-                        # Also remove from filename_map
-                        if filename in self.filename_map:
-                            del self.filename_map[filename]
-
-                        # Remove associated video thumbnail cache
-                        thumb_cache = os.path.join(attachments_path, f"_thumb_{filename}.png")
-                        if os.path.exists(thumb_cache):
-                            os.remove(thumb_cache)
-                    except Exception as e:
-                        print(f"Error removing {filename}: {e}")
-
-            # Save updated filename_map
-            self.save_filename_map()
+            threading.Thread(target=_worker, daemon=True).start()
 
         except Exception as e:
             print(f"Error cleaning up attachments: {e}")
+            self._attach_cleanup_running = False
+
+    def _finish_attachment_cleanup(self, notebook, deleted):
+        """Main-thread tail of the attachment cleanup: sync filename_map."""
+        self._attach_cleanup_running = False
+        # If the user switched notebooks mid-cleanup, filename_map now belongs
+        # to another notebook — leave it alone; stale entries in the old map
+        # are harmless and get pruned on that notebook's next save.
+        if notebook != self.current_notebook:
+            return
+        changed = False
+        for filename in deleted:
+            if filename in self.filename_map:
+                del self.filename_map[filename]
+                changed = True
+        if changed:
+            self.save_filename_map()
 
     def backup_notes(self):
-        """Create a backup of notes before saving"""
+        """Create a backup of notes before saving.
+
+        The current on-disk content is read synchronously (so the snapshot is
+        taken before the new save overwrites it); the backup write and the
+        old-backup pruning run on a background thread.
+        """
         note_path = self.get_note_file_path()
-        if os.path.exists(note_path):
+        if not os.path.exists(note_path):
+            return
+        try:
+            with open(note_path, "r", encoding="utf-8") as f:
+                old_content = f.read()
+        except Exception as e:
+            print(f"Error reading notes for backup: {e}")
+            return
+
+        notebook = self.current_notebook
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        def _worker():
             try:
                 backup_dir = "backups"
-                if not os.path.exists(backup_dir):
-                    os.makedirs(backup_dir)
-
-                # Keep last 10 backups per notebook
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                backup_file = os.path.join(backup_dir, f"{self.current_notebook}_backup_{timestamp}.txt")
-                shutil.copy2(note_path, backup_file)
+                os.makedirs(backup_dir, exist_ok=True)
+                backup_file = os.path.join(backup_dir, f"{notebook}_backup_{timestamp}.txt")
+                _atomic_write_text(backup_file, old_content)
 
                 # Clean old backups for this notebook, keep only last 10
-                prefix = f"{self.current_notebook}_backup_"
-                backups = sorted([f for f in os.listdir(backup_dir) if f.startswith(prefix)])
+                prefix = f"{notebook}_backup_"
+                backups = sorted(f for f in os.listdir(backup_dir) if f.startswith(prefix))
                 while len(backups) > 10:
-                    os.remove(os.path.join(backup_dir, backups.pop(0)))
+                    try:
+                        os.remove(os.path.join(backup_dir, backups.pop(0)))
+                    except FileNotFoundError:
+                        pass  # a concurrent prune already removed it
             except Exception as e:
                 print(f"Error creating backup: {e}")
+
+        self._backup_thread = threading.Thread(target=_worker, daemon=True)
+        self._backup_thread.start()
 
     def get_content_with_markers(self):
         """Get text content, replacing embedded images and file links with markers"""
@@ -3481,11 +4104,16 @@ class NoteApp:
             try:
                 self._viewer_save(viewer)
                 viewer.destroy()
-            except:
+            except Exception:
                 pass
         self._notebook_viewers.clear()
         self.save_notes()
         self.save_config()
+        # Give the in-flight backup write a moment to finish — daemon threads
+        # are killed at interpreter exit and could leave the backup unwritten
+        backup_thread = getattr(self, '_backup_thread', None)
+        if backup_thread is not None and backup_thread.is_alive():
+            backup_thread.join(timeout=3)
         self.root.destroy()
 
     def set_window_icon(self):
@@ -3524,8 +4152,8 @@ class NoteApp:
         attachments_path = self.get_attachments_path()
         map_file = os.path.join(attachments_path, "filename_map.json")
         try:
-            with open(map_file, "w", encoding="utf-8") as f:
-                json.dump(self.filename_map, f, ensure_ascii=False, indent=2)
+            _atomic_write_json(map_file, self.filename_map,
+                               ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"Error saving filename map: {e}")
 
@@ -3543,8 +4171,8 @@ class NoteApp:
         """Save URL title cache to JSON file."""
         cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "url_titles_cache.json")
         try:
-            with open(cache_file, "w", encoding="utf-8") as f:
-                json.dump(self._url_title_cache, f, ensure_ascii=False, indent=2)
+            _atomic_write_json(cache_file, self._url_title_cache,
+                               ensure_ascii=False, indent=2)
         except Exception:
             pass
 
@@ -3803,6 +4431,11 @@ class NoteApp:
         self.root.bind("<Command-f>", lambda e: self._toggle_search_bar())
         self.root.bind("<Control-f>", lambda e: self._toggle_search_bar())
 
+        # Bind Cmd+Shift+F / Ctrl+Shift+F for global (cross-notebook) search
+        for seq in ("<Command-Shift-f>", "<Command-F>",
+                    "<Control-Shift-f>", "<Control-F>"):
+            self.root.bind(seq, lambda e: self.show_global_search())
+
         # Bind Ctrl+Tab / Cmd+Tab for quick notebook switch (use bind_all for global capture)
         self.root.bind_all("<Control-Tab>", self.quick_switch_notebook)
         # Note: Command-Tab is reserved by macOS for app switching, use Control-Tab instead
@@ -3991,13 +4624,13 @@ class NoteApp:
             self._restore_highlight_snapshot(before, fl, ll)
             try:
                 ta.mark_set(tk.INSERT, cursor_pos)
-            except:
+            except Exception:
                 pass
         def redo_op():
             self._restore_highlight_snapshot(after, fl, ll)
             try:
                 ta.mark_set(tk.INSERT, cursor_pos)
-            except:
+            except Exception:
                 pass
 
         self.undo_stack.append(("highlight", undo_op, redo_op))
@@ -4296,8 +4929,7 @@ class NoteApp:
 
             # Save content to new notebook's notes file
             note_path = os.path.join(notebook_path, self.note_file)
-            with open(note_path, "w", encoding="utf-8") as f:
-                f.write(selected_content)
+            _atomic_write_text(note_path, selected_content)
 
             dialog.destroy()
 
@@ -4383,6 +5015,10 @@ class NoteApp:
         # List marker
         ta.tag_configure("md_list_marker", foreground=accent,
                          font=(SYSTEM_FONT, sz))
+        # Task list checkboxes (- [ ] / - [x])
+        self._configure_task_tags()
+        # Code block syntax highlighting colors
+        self._configure_syntax_tags()
         # Horizontal rule
         ta.tag_configure("md_hr", foreground=t["border"],
                          font=(SYSTEM_FONT, sz))
@@ -4395,6 +5031,8 @@ class NoteApp:
         # Bind cursor movement to show/hide markers on active line
         ta.bind("<ButtonRelease-1>", self._on_cursor_move, add="+")
         ta.bind("<KeyRelease>", self._on_cursor_move, add="+")
+        # Selection changes refresh the word-count stats
+        ta.bind("<<Selection>>", lambda e: self._schedule_word_count(), add="+")
 
     def _update_markdown_tag_styles(self):
         """Re-configure md_ tag fonts/colors after theme or font-size change."""
@@ -4434,12 +5072,104 @@ class NoteApp:
                          font=(SYSTEM_FONT, sz, "italic"))
         ta.tag_configure("md_list_marker", foreground=accent,
                          font=(SYSTEM_FONT, sz))
+        self._configure_task_tags()
         ta.tag_configure("md_hr", foreground=t["border"],
                          font=(SYSTEM_FONT, sz))
         ta.tag_configure("md_elide", elide=True)
         # URL preview tag update
         ta.tag_configure("url_preview", foreground=dim,
                          font=(SYSTEM_FONT, sz))
+        # Code block syntax highlighting colors
+        self._configure_syntax_tags()
+
+    def _configure_task_tags(self):
+        """Configure task-list checkbox tags and their click bindings.
+        Called from both initial setup and style refresh — switch_notebook
+        tag_delete()s all md_ tags, which drops config AND bindings."""
+        t = self.current_theme_colors
+        sz = self.current_font_size
+        ta = self.text_area
+        ta.tag_configure("md_task_box", foreground=t["accent"],
+                         font=(MONO_FONT, sz, "bold"))
+        ta.tag_configure("md_task_box_done", foreground=t["accent_green"],
+                         font=(MONO_FONT, sz, "bold"))
+        ta.tag_configure("md_task_done", foreground=t["fg_dim"], overstrike=True)
+        for tag in ("md_task_box", "md_task_box_done"):
+            ta.tag_bind(tag, "<Button-1>", self._on_task_box_click)
+            ta.tag_bind(tag, "<Enter>", lambda e: ta.config(cursor="hand2"))
+            ta.tag_bind(tag, "<Leave>", lambda e: ta.config(cursor=""))
+
+    def _configure_syntax_tags(self):
+        """Configure code-block syntax highlight colors for the theme."""
+        t = self.current_theme_colors
+        ta = self.text_area
+        ta.tag_configure("md_syn_kw", foreground=t["accent"])
+        ta.tag_configure("md_syn_str", foreground=t["accent_green"])
+        ta.tag_configure("md_syn_num", foreground=t["hl_orange"])
+        ta.tag_configure("md_syn_com", foreground=t["fg_placeholder"])
+
+    def _highlight_code_line(self, line, line_num, lang):
+        """Tokenize one line inside a ``` code block and tag keywords,
+        strings, numbers and comments. Line-based by design (multi-line
+        strings are not tracked) — good enough for note-sized snippets."""
+        if not line.strip():
+            return
+        ta = self.text_area
+        lang = _SYN_ALIASES.get(lang, lang)
+        keywords = _SYN_KEYWORDS.get(lang, frozenset())
+        comment_marker = _SYN_COMMENTS.get(lang)
+
+        # Comment start = first marker occurrence outside any string literal
+        comment_start = None
+        if comment_marker:
+            string_spans = [(m.start(), m.end()) for m in _SYN_STR_RE.finditer(line)]
+            pos = 0
+            while True:
+                pos = line.find(comment_marker, pos)
+                if pos == -1:
+                    break
+                if any(s <= pos < e for s, e in string_spans):
+                    pos += 1
+                    continue
+                comment_start = pos
+                break
+        if comment_start is not None:
+            ta.tag_add("md_syn_com",
+                       f"{line_num}.{comment_start}", f"{line_num}.{len(line)}")
+        limit = comment_start if comment_start is not None else len(line)
+
+        for m in _SYN_TOKEN_RE.finditer(line, 0, limit):
+            kind = m.lastgroup
+            if kind == 'str':
+                tag = "md_syn_str"
+            elif kind == 'num':
+                tag = "md_syn_num"
+            elif kind == 'word' and m.group() in keywords:
+                tag = "md_syn_kw"
+            else:
+                continue
+            ta.tag_add(tag, f"{line_num}.{m.start()}", f"{line_num}.{m.end()}")
+
+    def _on_task_box_click(self, event):
+        """Toggle a - [ ] / - [x] checkbox when its marker is clicked."""
+        ta = self.text_area
+        try:
+            idx = ta.index(f"@{event.x},{event.y}")
+        except tk.TclError:
+            return "break"
+        line_num = int(idx.split('.')[0])
+        line = ta.get(f"{line_num}.0", f"{line_num}.end")
+        m = re.match(r'^(\s*)([-*]) \[([ xX])\]', line)
+        if not m:
+            return "break"
+        state_col = m.start(3)
+        new_state = ' ' if m.group(3) in 'xX' else 'x'
+        ta.delete(f"{line_num}.{state_col}", f"{line_num}.{state_col + 1}")
+        ta.insert(f"{line_num}.{state_col}", new_state)
+        self.content_modified = True
+        self.schedule_auto_save()
+        self._schedule_markdown_update()
+        return "break"
 
     def _get_protected_ranges(self):
         """Return dict of {line_str: [(start, end), ...]} for file/icon/imgname/url_preview tags.
@@ -4524,6 +5254,7 @@ class NoteApp:
                     _url_tag_pairs.append((url, tag_name))
         lines = content.split('\n')
         in_code_block = False
+        code_lang = None
 
         for i, line in enumerate(lines):
             line_num = i + 1  # tk lines are 1-based
@@ -4539,12 +5270,14 @@ class NoteApp:
                     ta.tag_add("md_codeblock_fence", line_start, line_end)
                     self._record_elide(line_num, line_start, line_end)
                 in_code_block = not in_code_block
+                code_lang = stripped[3:].strip().lower() if in_code_block else None
                 continue
 
             # Inside code block
             if in_code_block:
                 if not self._is_in_protected(line_start, protected):
                     ta.tag_add("md_codeblock", line_start, line_end)
+                    self._highlight_code_line(line, line_num, code_lang)
                 continue
 
             # Horizontal rule: --- or ___ or *** (3+ chars, optional spaces)
@@ -4584,6 +5317,23 @@ class NoteApp:
                 self._apply_inline_markdown(line, line_num, protected)
                 continue
 
+            # Task list: - [ ] todo / - [x] done (checked before plain lists)
+            task_match = re.match(r'^(\s*)([-*]) \[([ xX])\](\s?)(.*)', line)
+            if task_match:
+                indent = len(task_match.group(1))
+                state = task_match.group(3)
+                box_start = f"{line_num}.{indent}"
+                box_end = f"{line_num}.{task_match.end(3) + 1}"  # through ']'
+                if not self._is_in_protected(box_start, protected):
+                    done = state in 'xX'
+                    ta.tag_add("md_task_box_done" if done else "md_task_box",
+                               box_start, box_end)
+                    if done and task_match.group(5):
+                        ta.tag_add("md_task_done",
+                                   f"{line_num}.{task_match.start(5)}", line_end)
+                self._apply_inline_markdown(line, line_num, protected)
+                continue
+
             # List markers: - , * , 1. , 2.  (space after marker optional before non-ASCII)
             list_match = re.match(r'^(\s*)([-*]|\d+\.)(?:\s|(?=[^\x00-\x7F]))', line)
             if list_match:
@@ -4604,6 +5354,12 @@ class NoteApp:
         for tag in ta.tag_names():
             if tag.startswith("md_"):
                 ta.tag_lower(tag)
+        # Syntax colors must render above md_codeblock (which sets a base fg)
+        for syn in ("md_syn_kw", "md_syn_str", "md_syn_num", "md_syn_com"):
+            try:
+                ta.tag_raise(syn, "md_codeblock")
+            except tk.TclError:
+                pass
         # Selection must render ABOVE highlight_ backgrounds, otherwise dragging
         # a selection across highlighted text makes the highlight color fight the
         # selection color and the region appears to flicker while selecting.
@@ -4623,12 +5379,15 @@ class NoteApp:
             if current_line in self._md_marker_ranges:
                 for s, e in self._md_marker_ranges[current_line]:
                     ta.tag_remove("md_elide", s, e)
-        except:
+        except Exception:
             pass
 
         # Update outline panel
         if hasattr(self, 'outline_text'):
             self._update_outline()
+
+        # Refresh word count (runs on load and after every debounced edit)
+        self._schedule_word_count()
 
         # Insert cached URL title previews (reverse order to avoid index shift)
         for url, tag_name in reversed(_url_tag_pairs):
@@ -4769,6 +5528,36 @@ class NoteApp:
             self.root.after_cancel(self._md_update_timer_id)
         self._md_update_timer_id = self.root.after(300, self._do_markdown_update)
 
+    # ── Word Count Status Bar ────────────────────────────────────────────
+
+    def _schedule_word_count(self):
+        """Debounced word-count refresh."""
+        if getattr(self, '_wc_timer_id', None) is not None:
+            self.root.after_cancel(self._wc_timer_id)
+        self._wc_timer_id = self.root.after(400, self._update_word_count)
+
+    def _update_word_count(self):
+        """Update the status bar: words (CJK chars count as one word each)
+        and characters. Shows selection stats while a selection is active."""
+        self._wc_timer_id = None
+        if not hasattr(self, '_wordcount_label'):
+            return
+        ta = self.text_area
+        try:
+            sel = ta.get(tk.SEL_FIRST, tk.SEL_LAST)
+        except tk.TclError:
+            sel = ""
+        text = sel if sel else ta.get("1.0", "end-1c")
+        words = len(re.findall(
+            r"[一-鿿㐀-䶿぀-ヿ가-힯]"
+            r"|[A-Za-z0-9_'’-]+", text))
+        chars = len(text) - text.count("\n")
+        key = "wc_stats_sel" if sel else "wc_stats"
+        try:
+            self._wordcount_label.configure(text=self.tr(key).format(words, chars))
+        except tk.TclError:
+            pass
+
     def _do_markdown_update(self):
         """Execute the debounced markdown update."""
         self._md_update_timer_id = None
@@ -4833,10 +5622,38 @@ class NoteApp:
         self._search_close_btn.pack(side=tk.LEFT, padx=(2, 0))
         self._search_close_btn.bind("<Button-1>", lambda e: self._close_search_bar())
 
+        # ── Replace row ──
+        replace_row = tk.Frame(self._search_frame, bg=t["bg_secondary"])
+        replace_row.pack(fill=tk.X, padx=6, pady=(0, 4))
+
+        self._replace_var = tk.StringVar()
+        self._replace_entry = tk.Entry(
+            replace_row, textvariable=self._replace_var,
+            font=(SYSTEM_FONT, self.ui_font_size),
+            bg=t["entry_bg"], fg=t["entry_fg"],
+            insertbackground=t["text_insert"],
+            highlightthickness=1, highlightcolor=t["accent"],
+            highlightbackground=t["border"], relief=tk.FLAT)
+        self._replace_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self._replace_btn = tk.Label(
+            replace_row, text=self.tr("replace_btn"), font=btn_font,
+            cursor="hand2", bg=t["bg_secondary"], fg=t["fg_dim"], padx=4)
+        self._replace_btn.pack(side=tk.LEFT, padx=(6, 2))
+        self._replace_btn.bind("<Button-1>", lambda e: self._replace_current())
+
+        self._replace_all_btn = tk.Label(
+            replace_row, text=self.tr("replace_all_btn"), font=btn_font,
+            cursor="hand2", bg=t["bg_secondary"], fg=t["fg_dim"], padx=4)
+        self._replace_all_btn.pack(side=tk.LEFT, padx=2)
+        self._replace_all_btn.bind("<Button-1>", lambda e: self._replace_all())
+
         # Key bindings on the entry
         self._search_entry.bind("<Return>", lambda e: self._search_next())
         self._search_entry.bind("<Shift-Return>", lambda e: self._search_prev())
         self._search_entry.bind("<Escape>", lambda e: self._close_search_bar())
+        self._replace_entry.bind("<Return>", lambda e: self._replace_current())
+        self._replace_entry.bind("<Escape>", lambda e: self._close_search_bar())
 
         # Configure search highlight tags on text_area
         self.text_area.tag_configure("search_match",
@@ -5002,6 +5819,234 @@ class NoteApp:
             return
         self._search_current_idx = (self._search_current_idx - 1) % len(self._search_matches)
         self._highlight_current_match()
+
+    def _replace_current(self):
+        """Replace the current match and advance to the next one."""
+        if not self._search_matches or self._search_current_idx < 0:
+            return
+        query = self._search_var.get()
+        if not query:
+            return
+        ta = self.text_area
+        s, e = self._search_matches[self._search_current_idx]
+        # The buffer may have changed since the match list was built — verify
+        # before touching anything, and just re-search if it went stale.
+        if ta.get(s, e).lower() != query.lower():
+            self._do_search()
+            return
+        replacement = self._replace_var.get()
+        ta.delete(s, e)
+        ta.insert(s, replacement)
+        ta.mark_set(tk.INSERT, f"{s}+{len(replacement)}c")
+        self.content_modified = True
+        self.schedule_auto_save()
+        self._schedule_markdown_update()
+        self._do_search()
+
+    def _replace_all(self):
+        """Replace every match in the document."""
+        query = self._search_var.get()
+        if not query:
+            return
+        self._do_search()  # refresh match list against current buffer
+        if not self._search_matches:
+            return
+        replacement = self._replace_var.get()
+        self.save_undo_state()  # single undo step for the whole batch
+        ta = self.text_area
+        count = 0
+        # Reverse order keeps earlier match indices valid while editing
+        for s, e in reversed(self._search_matches):
+            if ta.get(s, e).lower() == query.lower():
+                ta.delete(s, e)
+                ta.insert(s, replacement)
+                count += 1
+        self.content_modified = True
+        self.schedule_auto_save()
+        self._schedule_markdown_update()
+        self._do_search()
+        self._search_count_label.configure(text=self.tr("replaced_n").format(count))
+
+    # ── Global (Cross-Notebook) Search ───────────────────────────────────
+
+    def show_global_search(self):
+        """Search across all notebooks; pick a result to jump to it."""
+        t = self.current_theme_colors
+        uf = self.ui_font_size
+
+        dialog = tk.Toplevel(self.root)
+        dialog.transient(self.root)
+        dialog.overrideredirect(True)
+        dialog.configure(bg=t["border"])
+        card = tk.Frame(dialog, bg=t["bg_secondary"])
+        card.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+
+        # Header (doubles as drag handle)
+        header = tk.Frame(card, bg=t["bg_secondary"])
+        header.pack(fill=tk.X, padx=14, pady=(12, 0))
+        title_lbl = tk.Label(header, text=self.tr("global_search_title"),
+                             bg=t["bg_secondary"], fg=t["fg"],
+                             font=(SYSTEM_FONT, uf + 1, "bold"))
+        title_lbl.pack(side=tk.LEFT)
+        count_lbl = tk.Label(header, text="", bg=t["bg_secondary"], fg=t["fg_dim"],
+                             font=(SYSTEM_FONT, uf - 1))
+        count_lbl.pack(side=tk.LEFT, padx=10)
+        close_btn = tk.Label(header, text="✕", bg=t["bg_secondary"], fg=t["fg_dim"],
+                             font=(SYSTEM_FONT, uf), cursor="hand2")
+        close_btn.pack(side=tk.RIGHT)
+        close_btn.bind("<Button-1>", lambda e: dialog.destroy())
+
+        entry_var = tk.StringVar()
+        entry = tk.Entry(card, textvariable=entry_var,
+                         font=(SYSTEM_FONT, uf + 1),
+                         bg=t["entry_bg"], fg=t["entry_fg"],
+                         insertbackground=t["text_insert"], relief=tk.FLAT,
+                         highlightthickness=1, highlightcolor=t["accent"],
+                         highlightbackground=t["border"])
+        entry.pack(fill=tk.X, padx=14, pady=(10, 8), ipady=6)
+
+        list_frame = tk.Frame(card, bg=t["bg_secondary"])
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 12))
+        listbox = tk.Listbox(
+            list_frame, bg=t["list_bg"], fg=t["list_fg"],
+            selectbackground=t["list_select_bg"],
+            selectforeground=t["list_select_fg"],
+            font=(SYSTEM_FONT, uf), relief=tk.FLAT, activestyle="none",
+            highlightthickness=1, highlightbackground=t["border"])
+        sb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=listbox.yview,
+                           style="Visible.Vertical.TScrollbar")
+        listbox.config(yscrollcommand=sb.set)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        results = []   # [(notebook, occurrence_idx, preview), ...]
+        timer = [None]
+        marker_re = re.compile(
+            r'\[(?:IMAGE|FILE):[^\]]+\]|\[/?(?:STRIKE|HL)(?::\w+)?\]')
+        MAX_RESULTS = 300
+
+        def do_search():
+            timer[0] = None
+            query = entry_var.get().strip()
+            listbox.delete(0, tk.END)
+            results.clear()
+            if not query:
+                count_lbl.configure(text="")
+                return
+            q = query.lower()
+            for nb in self.get_notebooks_list():
+                try:
+                    if nb == self.current_notebook:
+                        # use the live editor state, not the (possibly stale) file
+                        content = self.get_content_with_markers()
+                    else:
+                        note_path = os.path.join(self.notebooks_dir, nb, self.note_file)
+                        if not os.path.exists(note_path):
+                            continue
+                        with open(note_path, "r", encoding="utf-8") as f:
+                            content = f.read()
+                except Exception:
+                    continue
+                occ = 0
+                for line in content.split('\n'):
+                    line_lower = line.lower()
+                    cnt = line_lower.count(q)
+                    if cnt and len(results) < MAX_RESULTS:
+                        p = line_lower.find(q)
+                        snippet = line
+                        if len(snippet) > 100:
+                            start = max(0, p - 30)
+                            snippet = (("…" if start else "")
+                                       + snippet[start:start + 100] + "…")
+                        preview = marker_re.sub('📎', snippet).strip()
+                        results.append((nb, occ, preview))
+                        listbox.insert(tk.END, f" {nb}  ·  {preview}")
+                    occ += cnt
+                if len(results) >= MAX_RESULTS:
+                    break
+            count_lbl.configure(
+                text=self.tr("global_results_n").format(len(results)))
+            if results:
+                listbox.selection_set(0)
+
+        def schedule(*_):
+            if timer[0] is not None:
+                self.root.after_cancel(timer[0])
+            timer[0] = self.root.after(250, do_search)
+
+        entry_var.trace_add("write", schedule)
+
+        def jump(event=None):
+            sel = listbox.curselection()
+            if not sel or not results:
+                return "break"
+            nb, occ, _preview = results[sel[0]]
+            query = entry_var.get().strip()
+            dialog.destroy()
+            self._global_search_jump(nb, query, occ)
+            return "break"
+
+        def move_sel(delta):
+            if not results:
+                return "break"
+            cur = listbox.curselection()
+            i = (cur[0] + delta) % len(results) if cur else 0
+            listbox.selection_clear(0, tk.END)
+            listbox.selection_set(i)
+            listbox.see(i)
+            return "break"
+
+        entry.bind("<Down>", lambda e: move_sel(1))
+        entry.bind("<Up>", lambda e: move_sel(-1))
+        entry.bind("<Return>", jump)
+        listbox.bind("<Return>", jump)
+        listbox.bind("<Double-Button-1>", jump)
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
+
+        # Drag the borderless window by its header
+        drag = {"x": 0, "y": 0}
+        def start_drag(e):
+            drag["x"], drag["y"] = e.x, e.y
+        def do_drag(e):
+            dialog.geometry(f"+{e.x_root - drag['x']}+{e.y_root - drag['y']}")
+        for w in (header, title_lbl):
+            w.bind("<Button-1>", start_drag)
+            w.bind("<B1-Motion>", do_drag)
+
+        # Center over the main window
+        dialog.update_idletasks()
+        w, h = 680, 480
+        px, py = self.root.winfo_rootx(), self.root.winfo_rooty()
+        pw, ph = self.root.winfo_width(), self.root.winfo_height()
+        dialog.geometry(f"{w}x{h}+{px + (pw - w) // 2}+{py + max(0, (ph - h) // 3)}")
+        dialog.lift()
+        dialog.attributes("-topmost", True)
+        dialog.grab_set()
+        dialog.focus_force()
+        entry.focus_set()
+
+    def _global_search_jump(self, notebook, query, occurrence_idx):
+        """Open *notebook*, run the in-note search for *query* and select
+        (approximately) the clicked occurrence."""
+        if notebook != self.current_notebook:
+            self.switch_notebook(notebook)
+        if not hasattr(self, '_search_frame'):
+            self._build_search_bar()
+        if not self._search_visible:
+            self._show_search_bar()
+        self._search_var.set(query)
+
+        def _select():
+            self._do_search()
+            if self._search_matches:
+                idx = min(occurrence_idx, len(self._search_matches) - 1)
+                self._search_current_idx = idx
+                # Anchor the cursor on the match so debounced re-searches
+                # keep selecting this occurrence rather than the first one
+                self.text_area.mark_set(tk.INSERT, self._search_matches[idx][0])
+                self._highlight_current_match()
+        # Run after the search entry's own 150ms debounce has fired
+        self.root.after(220, _select)
 
     # ── Outline Panel (Table of Contents) ─────────────────────────────────
 
@@ -5935,7 +6980,7 @@ class NoteApp:
             if tmp_path:
                 try:
                     os.unlink(tmp_path)
-                except:
+                except Exception:
                     pass
 
     def _rtf_escape(self, text):
@@ -6270,7 +7315,7 @@ class NoteApp:
             # Restore cursor position without scrolling
             try:
                 self.text_area.mark_set(tk.INSERT, cursor_pos)
-            except:
+            except Exception:
                 pass
 
             # Restore scroll position instead of jumping to cursor
@@ -6495,7 +7540,7 @@ class NoteApp:
             try:
                 if self.text_area.tag_ranges(tk.SEL):
                     self.text_area.delete(tk.SEL_FIRST, tk.SEL_LAST)
-            except:
+            except Exception:
                 pass
 
             # Insert text with URL detection at cursor position
@@ -6896,7 +7941,7 @@ class NoteApp:
                 else:
                     if self.image_resize_state is None:
                         self.text_area.config(cursor="")
-        except:
+        except Exception:
             pass
 
     def on_image_press(self, event, filename):
@@ -6925,7 +7970,7 @@ class NoteApp:
                     if hasattr(self, '_pending_click_id') and self._pending_click_id:
                         self.root.after_cancel(self._pending_click_id)
                     self._pending_click_id = self.root.after(300, lambda: self._do_image_click(filename))
-        except:
+        except Exception:
             pass
 
     def _do_image_click(self, filename):

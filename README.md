@@ -7,8 +7,12 @@ A lightweight, cross-platform desktop note-taking app built with Python and Tkin
 - Multiple notebooks with sidebar navigation
 - Paste images from clipboard (requires Pillow)
 - Outline / table of contents panel
-- Full-text search across notes
-- Edit history and automatic backups
+- In-note find & replace (Cmd/Ctrl+F) and global search across all notebooks (Cmd/Ctrl+Shift+F)
+- Markdown rendering with task-list checkboxes (`- [ ]` / `- [x]`, click to toggle) and code-block syntax highlighting
+- Edit history and automatic backups, with in-app backup restore
+- Export notebooks as ZIP, Markdown, or self-contained HTML
+- Word / character count status bar
+- Crash-safe atomic saves; backups and attachment cleanup run off the UI thread
 - Pin-on-top window, adjustable UI font size and padding
 - Light / dark themes
 - Bilingual UI (中文 / English)
