@@ -548,6 +548,8 @@ class NoteApp:
         self._md_update_timer_id = None
         self._md_active_line = None        # line with cursor (markers visible)
         self._md_marker_ranges = {}        # {line_num: [(start, end), ...]}
+        self._md_render_key = None         # fingerprint of last full render (skip no-op re-renders)
+        self._mouse1_down = False          # True while button-1 drag (defer re-render)
 
         # Floating notebook viewers
         self._notebook_viewers = []
@@ -5192,6 +5194,12 @@ mark.hl-purple { background: #e6d4f7; }
         ta.bind("<KeyRelease>", self._on_cursor_move, add="+")
         # Selection changes refresh the word-count stats
         ta.bind("<<Selection>>", lambda e: self._schedule_word_count(), add="+")
+        # Track button-1 state so _do_markdown_update can defer re-rendering
+        # while the user is drag-selecting (re-render mid-drag causes flicker)
+        ta.bind("<ButtonPress-1>",
+                lambda e: setattr(self, '_mouse1_down', True), add="+")
+        ta.bind("<ButtonRelease-1>",
+                lambda e: setattr(self, '_mouse1_down', False), add="+")
 
     def _update_markdown_tag_styles(self):
         """Re-configure md_ tag fonts/colors after theme or font-size change."""
@@ -5393,6 +5401,7 @@ mark.hl-purple { background: #e6d4f7; }
 
         content = ta.get("1.0", tk.END)
         if not content.strip():
+            self._md_render_key = self._compute_md_render_key()
             return
 
         protected = self._get_protected_ranges()
@@ -5551,6 +5560,15 @@ mark.hl-purple { background: #e6d4f7; }
         # Insert cached URL title previews (reverse order to avoid index shift)
         for url, tag_name in reversed(_url_tag_pairs):
             self._insert_url_preview(url, self._url_title_cache[url], tag_name)
+
+        # Fingerprint of the rendered steady state (content incl. previews +
+        # title cache size). _do_markdown_update skips when this is unchanged.
+        self._md_render_key = self._compute_md_render_key()
+
+    def _compute_md_render_key(self):
+        """Fingerprint of everything that affects the markdown render output."""
+        return (hash(self.text_area.get("1.0", tk.END)),
+                len(self._url_title_cache))
 
     def _apply_inline_markdown(self, line, line_num, protected):
         """Apply inline markdown (bold, italic, code) to a single line."""
@@ -5730,6 +5748,21 @@ mark.hl-purple { background: #e6d4f7; }
     def _do_markdown_update(self):
         """Execute the debounced markdown update."""
         self._md_update_timer_id = None
+
+        # While the user is drag-selecting, a full re-render reflows text and
+        # makes the selection/cursor flicker — defer until the button is up.
+        if self._mouse1_down:
+            self._md_update_timer_id = self.root.after(300, self._do_markdown_update)
+            return
+
+        # Skip the (expensive, flicker-prone) full re-render when nothing that
+        # affects the render output has changed since the last one.
+        try:
+            if self._compute_md_render_key() == self._md_render_key:
+                return
+        except Exception:
+            pass
+
         try:
             self.apply_markdown_formatting()
         except Exception as e:
@@ -7421,6 +7454,10 @@ mark.hl-purple { background: #e6d4f7; }
         # Try Tk native undo first (handles normal text typing/deletion)
         try:
             self.text_area.edit_undo()
+            # Native undo re-inserts text without tags — force the next
+            # markdown update to do a real re-render even if content matches
+            # the last rendered state.
+            self._md_render_key = None
             self._schedule_markdown_update()
             self.content_modified = True
             return "break"
@@ -7473,6 +7510,8 @@ mark.hl-purple { background: #e6d4f7; }
         # Try Tk native redo first
         try:
             self.text_area.edit_redo()
+            # Same as undo: re-inserted text has no tags, force re-render
+            self._md_render_key = None
             self._schedule_markdown_update()
             self.content_modified = True
             return "break"
