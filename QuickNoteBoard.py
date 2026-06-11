@@ -154,6 +154,9 @@ _I18N = {
     "search_placeholder": ("搜索...", "Search..."),
     "search_n_of_m":    ("{}/{}", "{}/{}"),
     # Text context menu
+    "ctx_cut":          ("剪切", "Cut"),
+    "ctx_copy":         ("复制", "Copy"),
+    "ctx_paste":        ("粘贴", "Paste"),
     "remove_strike":    ("取消删除线", "Remove Strikethrough"),
     "strikethrough":    ("删除线", "Strikethrough"),
     "highlight_menu":   ("高亮", "Highlight"),
@@ -4632,17 +4635,50 @@ mark.hl-purple { background: #e6d4f7; }
         self.text_area.bind("<Button-2>", self.show_text_context_menu)  # macOS
         self.text_area.bind("<Button-3>", self.show_text_context_menu)  # Windows/Linux
 
+    def context_menu_copy(self):
+        """Copy from context menu. handle_copy returns "break" when it handled
+        media/rich content itself; otherwise fall back to Tk's default copy."""
+        if self.handle_copy() != "break":
+            try:
+                self.text_area.event_generate("<<Copy>>")
+            except Exception:
+                pass
+
+    def context_menu_cut(self):
+        """Cut from context menu, falling back to Tk's default cut."""
+        if self.on_before_cut() != "break":
+            try:
+                self.text_area.event_generate("<<Cut>>")
+            except Exception:
+                pass
+
+    def context_menu_paste(self):
+        """Paste from context menu at the current insert position."""
+        self.text_area.focus_set()
+        try:
+            handled = self.handle_paste(None)
+        except Exception as e:
+            print(f"Error in context menu paste: {e}")
+            handled = None
+        if handled != "break":
+            try:
+                self.text_area.event_generate("<<Paste>>")
+            except Exception:
+                pass
+
     def show_text_context_menu(self, event):
         """Show context menu on right-click in text area"""
         has_selection = bool(self.text_area.tag_ranges(tk.SEL))
 
         if not has_selection:
-            # No selection: show highlight + notebook link menu for current line
+            # No selection: show paste + highlight + notebook link menu for current line
             menu = self.make_styled_menu()
             # Place cursor at right-click position
             click_idx = self.text_area.index(f"@{event.x},{event.y}")
             self.text_area.mark_set(tk.INSERT, click_idx)
             cursor_line = click_idx.split('.')[0]
+            menu.add_command(label=self.tr("ctx_paste"), command=self.context_menu_paste)
+            menu.add_separator()
             # Highlight colors for current line
             for color in self.HIGHLIGHT_NAMES:
                 menu.add_command(
@@ -4660,6 +4696,11 @@ mark.hl-purple { background: #e6d4f7; }
             return
 
         menu = self.make_styled_menu()
+
+        menu.add_command(label=self.tr("ctx_cut"), command=self.context_menu_cut)
+        menu.add_command(label=self.tr("ctx_copy"), command=self.context_menu_copy)
+        menu.add_command(label=self.tr("ctx_paste"), command=self.context_menu_paste)
+        menu.add_separator()
 
         sel_start = self.text_area.index(tk.SEL_FIRST)
         tags_at_sel = self.text_area.tag_names(sel_start)
