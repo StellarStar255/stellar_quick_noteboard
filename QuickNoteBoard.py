@@ -1226,6 +1226,7 @@ class NoteApp:
                        bg=t["menu_bg"], fg=t["menu_fg"],
                        activebackground=t["menu_active_bg"],
                        activeforeground=t["menu_active_fg"],
+                       disabledforeground=t["fg_dim"],
                        relief=tk.FLAT, borderwidth=1)
 
     def _theme_frame_children(self, frame, bg_color):
@@ -4667,65 +4668,59 @@ mark.hl-purple { background: #e6d4f7; }
                 pass
 
     def show_text_context_menu(self, event):
-        """Show context menu on right-click in text area"""
-        has_selection = bool(self.text_area.tag_ranges(tk.SEL))
+        """Show context menu on right-click in text area.
 
+        The menu always has the same items in the same order; items that
+        don't apply in the current context are grayed out, never hidden."""
+        has_selection = bool(self.text_area.tag_ranges(tk.SEL))
+        sel_state = tk.NORMAL if has_selection else tk.DISABLED
+        menu = self.make_styled_menu()
+
+        cursor_line = None
         if not has_selection:
-            # No selection: show paste + highlight + notebook link menu for current line
-            menu = self.make_styled_menu()
             # Place cursor at right-click position
             click_idx = self.text_area.index(f"@{event.x},{event.y}")
             self.text_area.mark_set(tk.INSERT, click_idx)
             cursor_line = click_idx.split('.')[0]
-            menu.add_command(label=self.tr("ctx_paste"), command=self.context_menu_paste)
-            menu.add_separator()
-            # Highlight colors for current line
-            for color in self.HIGHLIGHT_NAMES:
-                menu.add_command(
-                    label=self.tr(f"hl_{color}"),
-                    command=lambda c=color: self._toggle_line_highlight(c))
-            has_hl = any(self.text_area.tag_nextrange(f"highlight_{c}", f"{cursor_line}.0", f"{cursor_line}.end")
-                         for c in self.HIGHLIGHT_NAMES)
-            if has_hl:
-                menu.add_command(label=self.tr("remove_highlight"),
-                                 command=lambda: self._toggle_line_highlight_remove(cursor_line))
-            menu.add_separator()
-            menu.add_command(label=self.tr("copy_nb_link"),
-                             command=self.copy_notebook_link)
-            menu.tk_popup(event.x_root, event.y_root)
-            return
 
-        menu = self.make_styled_menu()
-
-        menu.add_command(label=self.tr("ctx_cut"), command=self.context_menu_cut)
-        menu.add_command(label=self.tr("ctx_copy"), command=self.context_menu_copy)
+        # Clipboard: cut/copy need a selection, paste always works
+        menu.add_command(label=self.tr("ctx_cut"), state=sel_state,
+                         command=self.context_menu_cut)
+        menu.add_command(label=self.tr("ctx_copy"), state=sel_state,
+                         command=self.context_menu_copy)
         menu.add_command(label=self.tr("ctx_paste"), command=self.context_menu_paste)
         menu.add_separator()
 
-        sel_start = self.text_area.index(tk.SEL_FIRST)
-        tags_at_sel = self.text_area.tag_names(sel_start)
-
-        # Strikethrough
-        has_strike = "strikethrough" in tags_at_sel
+        # Strikethrough (selection only); label reflects toggle state
+        has_strike = (has_selection and "strikethrough"
+                      in self.text_area.tag_names(self.text_area.index(tk.SEL_FIRST)))
         if has_strike:
             menu.add_command(label=self.tr("remove_strike"), command=self.remove_strikethrough)
         else:
-            menu.add_command(label=self.tr("strikethrough"), command=self.apply_strikethrough)
-
+            menu.add_command(label=self.tr("strikethrough"), state=sel_state,
+                             command=self.apply_strikethrough)
         menu.add_separator()
 
-        # Highlight colors (flat, no submenu)
+        # Highlight colors: apply to the selection, or to the clicked line
         for color in self.HIGHLIGHT_NAMES:
-            menu.add_command(
-                label=self.tr(f"hl_{color}"),
-                command=lambda c=color: self.apply_highlight(c))
-        has_hl = any(self.text_area.tag_nextrange(f"highlight_{c}", tk.SEL_FIRST, tk.SEL_LAST)
-                     for c in self.HIGHLIGHT_NAMES)
-        if has_hl:
-            menu.add_command(label=self.tr("remove_highlight"), command=self.remove_highlight)
+            cmd = (lambda c=color: self.apply_highlight(c)) if has_selection \
+                else (lambda c=color: self._toggle_line_highlight(c))
+            menu.add_command(label=self.tr(f"hl_{color}"), command=cmd)
+        if has_selection:
+            has_hl = any(self.text_area.tag_nextrange(f"highlight_{c}", tk.SEL_FIRST, tk.SEL_LAST)
+                         for c in self.HIGHLIGHT_NAMES)
+            remove_cmd = self.remove_highlight
+        else:
+            has_hl = any(self.text_area.tag_nextrange(f"highlight_{c}", f"{cursor_line}.0", f"{cursor_line}.end")
+                         for c in self.HIGHLIGHT_NAMES)
+            remove_cmd = lambda: self._toggle_line_highlight_remove(cursor_line)
+        menu.add_command(label=self.tr("remove_highlight"),
+                         state=tk.NORMAL if has_hl else tk.DISABLED,
+                         command=remove_cmd)
 
         menu.add_separator()
-        menu.add_command(label=self.tr("save_as_nb"), command=self.save_selection_as_notebook)
+        menu.add_command(label=self.tr("save_as_nb"), state=sel_state,
+                         command=self.save_selection_as_notebook)
         menu.add_command(label=self.tr("copy_nb_link"), command=self.copy_notebook_link)
 
         menu.tk_popup(event.x_root, event.y_root)
