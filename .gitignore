@@ -70,3 +70,6 @@ GenerateTraceFile.py
 
 attachments
 !assets/*.png
+# Packaging build output
+/build/
+/dist/

@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk
 import os
+import sys
 import time
 import json
 import shutil
@@ -21,6 +22,52 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
     print("Warning: Pillow not installed. Image paste feature disabled. Install with: pip install Pillow")
+
+APP_VERSION = "1.0.0"
+GITHUB_REPO = "StellarStar255/stellar_quick_noteboard"
+RELEASES_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+RELEASES_PAGE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
+
+IS_FROZEN = getattr(sys, "frozen", False)
+
+
+def _resource_path(*parts):
+    """Path to a bundled read-only resource, both from source and frozen."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, *parts)
+
+
+def _user_data_dir():
+    """Per-user writable data directory for the installed (frozen) app.
+
+    Overridable via STELLAR_NOTEBOARD_DATA_DIR (used by tests and portable
+    setups). When running from source the app keeps using the current
+    working directory, matching the historical behaviour.
+    """
+    override = os.environ.get("STELLAR_NOTEBOARD_DATA_DIR")
+    if override:
+        return override
+    home = os.path.expanduser("~")
+    system = platform.system()
+    if system == "Darwin":
+        return os.path.join(home, "Library", "Application Support",
+                            "StellarQuickNoteboard")
+    if system == "Windows":
+        return os.path.join(os.environ.get("APPDATA", home),
+                            "StellarQuickNoteboard")
+    xdg = os.environ.get("XDG_DATA_HOME",
+                         os.path.join(home, ".local", "share"))
+    return os.path.join(xdg, "stellar-quick-noteboard")
+
+
+def _parse_version(text):
+    """'v1.2.3' / '1.2.3' -> (1, 2, 3); unparseable parts count as 0."""
+    parts = []
+    for chunk in text.strip().lstrip("vV").split("."):
+        m = re.match(r"\d+", chunk)
+        parts.append(int(m.group()) if m else 0)
+    return tuple(parts or [0])
+
 
 def _get_system_font():
     """Get the best available system font for the current platform."""
@@ -240,6 +287,19 @@ _I18N = {
     # Word count status bar
     "wc_stats":         ("字数 {}  ·  字符 {}", "{} words  ·  {} chars"),
     "wc_stats_sel":     ("选中：字数 {}  ·  字符 {}", "Selected: {} words  ·  {} chars"),
+    # Software update
+    "check_update":     ("检查更新... (当前 v{})", "Check for Updates… (v{})"),
+    "update_title":     ("软件更新", "Software Update"),
+    "update_available": ("发现新版本 v{}（当前 v{}）。\n是否下载并升级？",
+                         "Version v{} is available (you have v{}).\nDownload and upgrade now?"),
+    "update_none":      ("当前已是最新版本（v{}）。", "You are up to date (v{})."),
+    "update_downloading": ("正在下载更新...", "Downloading update…"),
+    "update_ready_msg": ("安装包已开始安装。\n本应用即将退出，请按安装程序提示完成升级。",
+                         "The installer has been launched.\nThis app will now quit — follow the installer to finish upgrading."),
+    "update_failed":    ("检查更新失败：{}\n\n也可以到发布页手动下载。",
+                         "Update check failed: {}\n\nYou can also download manually from the releases page."),
+    "update_no_asset":  ("新版本 v{} 暂无适用于当前系统的安装包，\n是否打开发布页手动下载？",
+                         "v{} has no installer for this platform yet.\nOpen the releases page to download manually?"),
 }
 
 # ── Lightweight code-block syntax highlighting (stdlib only) ──────────
@@ -1418,6 +1478,9 @@ class NoteApp:
         menu.add_separator()
         menu.add_command(label=self.tr("refresh_display"), command=self.reload_display)
         menu.add_command(label=self.tr("clean_attach"), command=self.cleanup_orphaned_attachments)
+        menu.add_separator()
+        menu.add_command(label=self.tr("check_update").format(APP_VERSION),
+                         command=self.check_for_updates)
 
         # Show menu at button position
         try:
@@ -4240,9 +4303,143 @@ mark.hl-purple { background: #e6d4f7; }
             backup_thread.join(timeout=3)
         self.root.destroy()
 
+    # ── Software update ────────────────────────────────────────────────
+    def check_for_updates(self, silent=False):
+        """Query GitHub Releases for a newer version; offer one-click upgrade.
+
+        Network I/O runs on a daemon thread; all UI happens back on the Tk
+        main loop via root.after. With silent=True (startup check) errors
+        and "already up to date" are swallowed.
+        """
+        def worker():
+            try:
+                req = urllib.request.Request(
+                    RELEASES_API_URL,
+                    headers={"User-Agent": f"StellarQuickNoteboard/{APP_VERSION}",
+                             "Accept": "application/vnd.github+json"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+            except Exception as e:
+                if not silent:
+                    self.root.after(0, lambda e=e: self._show_update_error(e))
+                return
+            tag = data.get("tag_name") or ""
+            assets = [(a.get("name") or "", a.get("browser_download_url") or "")
+                      for a in (data.get("assets") or [])]
+            self.root.after(0, lambda: self._on_update_info(tag, assets, silent))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_update_error(self, error):
+        import tkinter.messagebox as messagebox
+        if messagebox.askyesno(self.tr("update_title"),
+                               self.tr("update_failed").format(error),
+                               parent=self.root):
+            webbrowser.open(RELEASES_PAGE_URL)
+
+    def _update_asset_suffix(self):
+        return {"Darwin": ".dmg", "Windows": ".exe",
+                "Linux": ".deb"}.get(platform.system())
+
+    def _on_update_info(self, tag, assets, silent):
+        import tkinter.messagebox as messagebox
+        latest = _parse_version(tag) if tag else (0,)
+        if latest <= _parse_version(APP_VERSION):
+            if not silent:
+                messagebox.showinfo(self.tr("update_title"),
+                                    self.tr("update_none").format(APP_VERSION),
+                                    parent=self.root)
+            return
+        new_ver = tag.lstrip("vV")
+        suffix = self._update_asset_suffix()
+        asset = next(((n, u) for n, u in assets
+                      if suffix and n.lower().endswith(suffix)), None)
+        if asset is None:
+            if messagebox.askyesno(self.tr("update_title"),
+                                   self.tr("update_no_asset").format(new_ver),
+                                   parent=self.root):
+                webbrowser.open(RELEASES_PAGE_URL)
+            return
+        if messagebox.askyesno(self.tr("update_title"),
+                               self.tr("update_available").format(new_ver, APP_VERSION),
+                               parent=self.root):
+            self._download_and_run_update(asset[0], asset[1])
+
+    def _download_and_run_update(self, filename, url):
+        """Download the installer to a temp dir, launch it, then quit."""
+        import tempfile
+        progress = tk.Toplevel(self.root)
+        progress.title(self.tr("update_title"))
+        progress.transient(self.root)
+        progress.resizable(False, False)
+        colors = self.current_theme_colors
+        progress.configure(bg=colors["bg"])
+        label = tk.Label(progress, text=self.tr("update_downloading"),
+                         bg=colors["bg"], fg=colors["fg"],
+                         font=(SYSTEM_FONT, 12), padx=30, pady=20)
+        label.pack()
+        progress.update_idletasks()
+
+        def report(percent):
+            try:
+                label.config(text=f'{self.tr("update_downloading")} {percent}%')
+            except tk.TclError:
+                pass
+
+        def worker():
+            try:
+                dest = os.path.join(tempfile.mkdtemp(prefix="sqn_update_"),
+                                    filename)
+                req = urllib.request.Request(
+                    url, headers={"User-Agent":
+                                  f"StellarQuickNoteboard/{APP_VERSION}"})
+                with urllib.request.urlopen(req, timeout=30) as resp, \
+                        open(dest, "wb") as f:
+                    total = int(resp.headers.get("Content-Length") or 0)
+                    done = 0
+                    while True:
+                        chunk = resp.read(65536)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        done += len(chunk)
+                        if total:
+                            self.root.after(
+                                0, lambda p=done * 100 // total: report(p))
+                self.root.after(0, lambda: self._launch_update(dest, progress))
+            except Exception as e:
+                def fail(e=e):
+                    try:
+                        progress.destroy()
+                    except tk.TclError:
+                        pass
+                    self._show_update_error(e)
+                self.root.after(0, fail)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _launch_update(self, installer_path, progress_window):
+        import tkinter.messagebox as messagebox
+        try:
+            progress_window.destroy()
+        except tk.TclError:
+            pass
+        system = platform.system()
+        try:
+            if system == "Windows":
+                os.startfile(installer_path)
+            elif system == "Darwin":
+                subprocess.Popen(["open", installer_path])
+            else:
+                subprocess.Popen(["xdg-open", installer_path])
+        except Exception as e:
+            self._show_update_error(e)
+            return
+        messagebox.showinfo(self.tr("update_title"),
+                            self.tr("update_ready_msg"), parent=self.root)
+        self.on_closing()
+
     def set_window_icon(self):
         """Set the window icon"""
-        icon_path = os.path.join(os.path.dirname(__file__), "assets", "quick_note_board.png")
+        icon_path = _resource_path("assets", "quick_note_board.png")
         if os.path.exists(icon_path) and PIL_AVAILABLE:
             try:
                 icon_image = Image.open(icon_path)
@@ -9301,6 +9498,15 @@ mark.hl-purple { background: #e6d4f7; }
         return "break"
 
 if __name__ == "__main__":
+    # Installed (frozen) builds keep user data in a per-user directory; the
+    # install location is read-only. Running from source keeps the historical
+    # behaviour of using the current working directory.
+    if IS_FROZEN or os.environ.get("STELLAR_NOTEBOARD_DATA_DIR"):
+        data_dir = _user_data_dir()
+        os.makedirs(data_dir, exist_ok=True)
+        os.chdir(data_dir)
     root = tk.Tk()
     app = NoteApp(root)
+    if IS_FROZEN:
+        root.after(5000, lambda: app.check_for_updates(silent=True))
     root.mainloop()

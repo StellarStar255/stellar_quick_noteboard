@@ -1,0 +1,188 @@
+name: Release
+
+# Push a tag like v1.2.3 to build signed installers for macOS (.dmg),
+# Windows (.exe) and Debian/Ubuntu (.deb) and publish a GitHub Release.
+#
+# Code signing is optional: each signing step only runs when the matching
+# repository secrets exist, otherwise the build ships unsigned.
+#   macOS:   MACOS_CERT_P12 (base64 .p12), MACOS_CERT_PASSWORD,
+#            MACOS_SIGN_IDENTITY ("Developer ID Application: ... (TEAMID)")
+#            + APPLE_ID / APPLE_TEAM_ID / APPLE_APP_PASSWORD for notarization
+#   Windows: WINDOWS_CERT_PFX (base64 .pfx), WINDOWS_CERT_PASSWORD
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tag matches APP_VERSION
+        id: ver
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          APP_VERSION="$(grep -oP '^APP_VERSION = "\K[^"]+' QuickNoteBoard.py)"
+          if [ "$TAG_VERSION" != "$APP_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match APP_VERSION=$APP_VERSION in QuickNoteBoard.py"
+            exit 1
+          fi
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+
+  build-macos:
+    needs: verify
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install pyinstaller pillow
+      - name: Build app bundle
+        run: pyinstaller packaging/QuickNoteBoard.spec --noconfirm
+      - name: Import signing certificate (if configured)
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          if [ -z "$MACOS_CERT_P12" ]; then
+            echo "No macOS certificate secret; building unsigned."
+            exit 0
+          fi
+          echo "$MACOS_CERT_P12" | base64 -d > cert.p12
+          security create-keychain -p ci-keychain-pass build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p ci-keychain-pass build.keychain
+          security set-keychain-settings -lut 3600 build.keychain
+          security import cert.p12 -k build.keychain \
+            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k ci-keychain-pass build.keychain
+          rm cert.p12
+      - name: Build dmg (sign + notarize when secrets exist)
+        env:
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: bash packaging/build_dmg.sh "$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  build-linux:
+    needs: verify
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk python3-pip
+          pip3 install pyinstaller pillow
+      - name: Build binary
+        run: pyinstaller packaging/QuickNoteBoard.spec --noconfirm
+      - name: Build deb
+        run: bash packaging/build_deb.sh "$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb
+          path: dist/*.deb
+          if-no-files-found: error
+
+  build-windows:
+    needs: verify
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install pyinstaller pillow
+      - name: Build app
+        run: pyinstaller packaging/QuickNoteBoard.spec --noconfirm
+      - name: Decode signing certificate (if configured)
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+        run: |
+          if ($env:WINDOWS_CERT_PFX) {
+            [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.pfx",
+              [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
+            echo "HAVE_CERT=1" >> $env:GITHUB_ENV
+          } else {
+            echo "No Windows certificate secret; building unsigned."
+          }
+      - name: Sign app executable (if configured)
+        if: env.HAVE_CERT == '1'
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName | Select-Object -Last 1 -ExpandProperty FullName
+          & $signtool sign /f "$env:RUNNER_TEMP\cert.pfx" /p $env:WINDOWS_CERT_PASSWORD `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+            dist\StellarQuickNoteboard\StellarQuickNoteboard.exe
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+            /DAppVersion=$env:VERSION packaging\installer.iss
+      - name: Sign installer (if configured)
+        if: env.HAVE_CERT == '1'
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName | Select-Object -Last 1 -ExpandProperty FullName
+          & $signtool sign /f "$env:RUNNER_TEMP\cert.pfx" /p $env:WINDOWS_CERT_PASSWORD `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+            (Get-ChildItem dist\*-Setup.exe).FullName
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: dist/*-Setup.exe
+          if-no-files-found: error
+
+  release:
+    needs: [verify, build-macos, build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          body: |
+            ## 下载 / Downloads
+
+            | 平台 Platform | 安装包 Installer |
+            | --- | --- |
+            | macOS (Apple Silicon) | `StellarQuickNoteboard-*-macOS.dmg` |
+            | Windows 10/11 (64-bit) | `StellarQuickNoteboard-*-Setup.exe` |
+            | Debian / Ubuntu | `stellar-quick-noteboard_*_amd64.deb` |
+
+            安装后可在应用内「图标」菜单 →「检查更新」一键升级。
+            In-app updates: Icon menu → "Check for Updates".

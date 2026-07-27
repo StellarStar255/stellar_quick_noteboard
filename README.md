@@ -25,6 +25,20 @@ A lightweight, cross-platform desktop note-taking app built with Python and Tkin
 
 ## Installation
 
+### Download an installer (recommended)
+
+Grab the latest installer from the [Releases page](https://github.com/StellarStar255/stellar_quick_noteboard/releases/latest):
+
+| Platform | File |
+| --- | --- |
+| macOS (Apple Silicon) | `StellarQuickNoteboard-<version>-macOS.dmg` |
+| Windows 10/11 (64-bit) | `StellarQuickNoteboard-<version>-Setup.exe` |
+| Debian / Ubuntu | `stellar-quick-noteboard_<version>_amd64.deb` |
+
+Installed builds store data in the per-user data directory (`~/Library/Application Support/StellarQuickNoteboard` on macOS, `%APPDATA%\StellarQuickNoteboard` on Windows, `~/.local/share/stellar-quick-noteboard` on Linux) and can self-update: Icon menu → "Check for Updates" downloads and launches the new installer.
+
+### Run from source
+
 ```bash
 git clone https://github.com/StellarStar255/stellar_quick_noteboard
 cd stellar_quick_noteboard
