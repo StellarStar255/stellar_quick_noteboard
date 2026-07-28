@@ -10,6 +10,8 @@ import re
 import urllib.request
 from dataclasses import dataclass, field
 
+from noteboard.core import net
+
 
 def parse_version(text):
     """'v1.2.3' / '1.2.3' -> (1, 2, 3); unparseable parts count as 0.
@@ -38,7 +40,8 @@ def fetch_latest(api_url, user_agent):
         api_url,
         headers={"User-Agent": user_agent,
                  "Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with urllib.request.urlopen(req, timeout=10,
+                                context=net.ssl_context()) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     tag = data.get("tag_name") or ""
     assets = [(a.get("name") or "", a.get("browser_download_url") or "")
@@ -72,7 +75,8 @@ def download(url, dest_path, user_agent, progress_cb=None):
     whenever the server provided a Content-Length.
     """
     req = urllib.request.Request(url, headers={"User-Agent": user_agent})
-    with urllib.request.urlopen(req, timeout=30) as resp, \
+    with urllib.request.urlopen(req, timeout=30,
+                                context=net.ssl_context()) as resp, \
             open(dest_path, "wb") as f:
         total = int(resp.headers.get("Content-Length") or 0)
         done = 0

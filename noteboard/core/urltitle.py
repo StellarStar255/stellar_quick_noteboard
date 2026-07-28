@@ -11,6 +11,8 @@ import urllib.request
 import zlib
 from urllib.parse import urlparse
 
+from noteboard.core import net
+
 # Same browser-like headers as v1 (L9399-9404)
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -26,7 +28,8 @@ def fetch_title(url, timeout=5):
         original_host = urlparse(url).hostname
 
         req = urllib.request.Request(url, headers=dict(_HEADERS))
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout,
+                                    context=net.ssl_context()) as resp:
             content_type = resp.headers.get("Content-Type", "")
             if "text/html" not in content_type and "application/xhtml" not in content_type:
                 return None

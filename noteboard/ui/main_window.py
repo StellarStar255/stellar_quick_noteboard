@@ -12,7 +12,7 @@ import re
 import shutil
 from datetime import datetime
 
-from PySide6.QtCore import QThreadPool, QTimer, Qt
+from PySide6.QtCore import QEvent, QThreadPool, QTimer, Qt
 from PySide6.QtGui import (QCursor, QFont, QGuiApplication, QIcon,
                            QKeySequence, QShortcut, QTextCharFormat,
                            QTextCursor)
@@ -320,12 +320,27 @@ class MainWindow(QMainWindow):
             lambda: self.check_for_updates(False))
         menu.addSeparator()
         self.act_tray_quit = menu.addAction("")
-        self.act_tray_quit.triggered.connect(self.close)
+        self.act_tray_quit.triggered.connect(self.quit_app)
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
+        app = QApplication.instance()
+        if app is not None:
+            # Close now hides to the tray, so the app must survive having
+            # no visible window; dock/taskbar activation re-shows it.
+            app.setQuitOnLastWindowClosed(False)
+            app.installEventFilter(self)
         # The tray is built after _build_ui's retranslate pass — label it now.
         self.retranslate()
+
+    def eventFilter(self, obj, event):
+        app = QApplication.instance()
+        if (obj is app and event.type() == QEvent.Type.ApplicationActivate
+                and not self.isVisible()):
+            # macOS dock click (or taskbar activation) with the window
+            # hidden in the tray: bring it back.
+            self._tray_show_window()
+        return super().eventFilter(obj, event)
 
     def _tray_show_window(self):
         self.showNormal()
@@ -1303,13 +1318,32 @@ class MainWindow(QMainWindow):
         tr = self.translator.tr
         if dialogs.ask_confirm(self, tr, tr("quit_confirm_title"),
                                tr("quit_confirm_msg")):
-            self.close()
+            self.quit_app()
+
+    def quit_app(self):
+        """Really exit (Cmd+Q / tray 退出) — closeEvent then quits."""
+        self._quitting = True
+        self.close()
 
     def closeEvent(self, event):
         """v1 on_closing: save + destroy the floating viewers first (their
         signals blocked so the sync-back can't clobber the main editor,
         like v1's destroy() skipping the WM_DELETE handler), then save
-        everything, wait briefly for the backup thread, and close."""
+        everything, wait briefly for the backup thread, and close.
+
+        With a system tray present, the window close button minimizes to
+        the tray instead (notes still saved); only Cmd+Q or the tray's
+        退出 action really exits."""
+        if (getattr(self, "tray", None) is not None
+                and not getattr(self, "_quitting", False)):
+            try:
+                self.save_notes()
+            except Exception as e:
+                print(f"Error saving on hide-to-tray: {e}")
+            self._save_config()
+            self.hide()
+            event.ignore()
+            return
         self._autosave_timer.stop()
         for viewer in list(self.viewers.values()):
             try:

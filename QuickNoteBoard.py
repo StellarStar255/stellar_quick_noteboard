@@ -60,6 +60,17 @@ def _user_data_dir():
     return os.path.join(xdg, "stellar-quick-noteboard")
 
 
+def _ssl_context():
+    """TLS context that works in frozen builds: the bundled OpenSSL cannot
+    see the OS trust store, so prefer certifi's CA bundle when present."""
+    import ssl
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
 def _parse_version(text):
     """'v1.2.3' / '1.2.3' -> (1, 2, 3); unparseable parts count as 0."""
     parts = []
@@ -4379,7 +4390,7 @@ mark.hl-purple { background: #e6d4f7; }
                     RELEASES_API_URL,
                     headers={"User-Agent": f"StellarQuickNoteboard/{APP_VERSION}",
                              "Accept": "application/vnd.github+json"})
-                with urllib.request.urlopen(req, timeout=10) as resp:
+                with urllib.request.urlopen(req, timeout=10, context=_ssl_context()) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
             except Exception as e:
                 if not silent:
@@ -4453,7 +4464,7 @@ mark.hl-purple { background: #e6d4f7; }
                 req = urllib.request.Request(
                     url, headers={"User-Agent":
                                   f"StellarQuickNoteboard/{APP_VERSION}"})
-                with urllib.request.urlopen(req, timeout=30) as resp, \
+                with urllib.request.urlopen(req, timeout=30, context=_ssl_context()) as resp, \
                         open(dest, "wb") as f:
                     total = int(resp.headers.get("Content-Length") or 0)
                     done = 0
@@ -9402,7 +9413,7 @@ mark.hl-purple { background: #e6d4f7; }
                 "Accept-Encoding": "gzip, deflate",
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             })
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=5, context=_ssl_context()) as resp:
                 content_type = resp.headers.get("Content-Type", "")
                 if "text/html" not in content_type and "application/xhtml" not in content_type:
                     return None
