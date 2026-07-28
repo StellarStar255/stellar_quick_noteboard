@@ -29,15 +29,18 @@ from noteboard.core.theme import THEMES
 from noteboard.core.version import APP_VERSION
 from noteboard.core.i18n import Translator
 from noteboard.ui import dialogs
+from noteboard.ui.backup_dialog import BackupRestoreDialog
 from noteboard.ui.editor.document import MarkerDocument
 from noteboard.ui.editor.highlighter import MarkdownHighlighter
 from noteboard.ui.editor.note_edit import NoteTextEdit
 from noteboard.ui.editor.url_preview import UrlPreviewManager
 from noteboard.ui.find_bar import FindBar
 from noteboard.ui.global_search import GlobalSearchDialog
+from noteboard.ui.outline_panel import OutlinePanel
 from noteboard.ui.qss import build_qss
 from noteboard.ui.recycle_box import RecycleBox
 from noteboard.ui.sidebar import Sidebar
+from noteboard.ui.viewer_window import ViewerWindow
 
 _IS_LINUX = platform.system() == "Linux"
 
@@ -87,6 +90,7 @@ class MainWindow(QMainWindow):
         self._dirty = False
         self._loading = False
         self._pool = QThreadPool.globalInstance()
+        self.viewers = {}  # notebook name -> ViewerWindow (v1 _notebook_viewers)
 
         # ── timers ──
         self._autosave_timer = QTimer(self)
@@ -107,6 +111,9 @@ class MainWindow(QMainWindow):
         self._apply_config()
         self._load_notebook(self.current_notebook)
         self._update_word_count()
+        # restore the outline panel's open state (v1 _outline_restore)
+        if self.cfg.get("outline_visible"):
+            self.outline.toggle()
 
     # ── UI construction ──────────────────────────────────────────────
 
@@ -138,8 +145,7 @@ class MainWindow(QMainWindow):
         self.toolbar.addWidget(spacer)
 
         self.btn_search = self._tool_btn("", self.toggle_find_bar)
-        self.btn_outline = self._tool_btn("", None)
-        self.btn_outline.setEnabled(False)  # outline panel arrives later
+        self.btn_outline = self._tool_btn("", self.toggle_outline)
         self.btn_save = self._tool_btn("", self.save_notes)
         self.btn_history = self._tool_btn("", self.show_history)
         self.btn_notebook = self._tool_btn("", self.show_notebook_menu)
@@ -205,6 +211,11 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.editor, 1)
         doc.contentsChanged.connect(self._on_content_changed)
         self.editor.selectionChanged.connect(self._wc_timer.start)
+
+        # Floating outline / TOC panel over the editor (M6)
+        self.outline = OutlinePanel(self.editor, self.translator,
+                                    THEMES[self.theme_name], self.cfg,
+                                    self._schedule_config_save)
 
         # URL title previews (ephemeral lines, never serialized)
         self.url_previews = UrlPreviewManager(
@@ -349,6 +360,7 @@ class MainWindow(QMainWindow):
         self.btn_theme.setText(t["theme_icon"])
         self.marker_doc.theme = t
         self.highlighter.set_theme(t)
+        self.outline.apply_theme(t)
         self._apply_editor_style()
 
     def _apply_editor_style(self):
@@ -415,6 +427,7 @@ class MainWindow(QMainWindow):
         self.sidebar.retranslate()
         self.recycle.retranslate()
         self.find_bar.retranslate()
+        self.outline.retranslate()
         self._update_status_notebook()
         self._update_word_count()
 
@@ -446,6 +459,7 @@ class MainWindow(QMainWindow):
         self._wc_timer.start()
         self.url_previews.rescan()  # cached titles now, fetch the rest
         self.find_bar.refresh()
+        self.outline.update_outline()
         self.editor.setFocus()
 
     def switch_notebook(self, name):
@@ -456,6 +470,10 @@ class MainWindow(QMainWindow):
             return
         self.save_notes(quick=True)
         self._autosave_timer.stop()
+        # v1 L2591: save the target's open viewer first so we load latest
+        viewer = self.viewers.get(name)
+        if viewer is not None:
+            viewer.save_now()
         self.current_notebook = name
         self._load_notebook(name)
         self._schedule_config_save()
@@ -701,7 +719,7 @@ class MainWindow(QMainWindow):
         menu.addAction(tr("export_html"), self.export_notebook_html)
         menu.addAction(tr("import_nb"), self.import_notebook)
         menu.addSeparator()
-        menu.addAction(tr("restore_backup")).setEnabled(False)  # M5
+        menu.addAction(tr("restore_backup"), self.show_restore_backup_dialog)
         menu.exec(QCursor.pos())
 
     def show_notebook_context_menu(self, name, global_pos):
@@ -718,7 +736,8 @@ class MainWindow(QMainWindow):
         menu.addAction(tr("move_up"), lambda: self.move_notebook(name, -1))
         menu.addAction(tr("move_down"), lambda: self.move_notebook(name, +1))
         menu.addSeparator()
-        menu.addAction(tr("open_viewer")).setEnabled(False)  # M6
+        menu.addAction(tr("open_viewer"),
+                       lambda: self.open_notebook_viewer(name))
         menu.addSeparator()
         menu.addAction(tr("export_nb"), lambda: self.export_notebook(name))
         menu.addAction(tr("import_nb"), self.import_notebook)
@@ -817,6 +836,91 @@ class MainWindow(QMainWindow):
     def indent_text(self):
         """v1 indent_text: indent selected lines (or the current line)."""
         self.editor.indent_selection()
+
+    # ── outline / TOC panel (M6) ─────────────────────────────────────
+
+    def toggle_outline(self):
+        """v1 _toggle_outline: the 目录 toolbar button / panel ✕."""
+        self.outline.toggle()
+
+    # ── floating notebook viewers (M6) ───────────────────────────────
+
+    def open_notebook_viewer(self, name):
+        """v1 _open_notebook_viewer (L2068): one non-modal editable window
+        per notebook; re-opening an already-open one just re-focuses it."""
+        viewer = self.viewers.get(name)
+        if viewer is not None:
+            viewer.raise_()
+            viewer.activateWindow()
+            return viewer
+        viewer = ViewerWindow(self.store, name, self.translator,
+                              THEMES[self.theme_name], self.cfg,
+                              parent=self)
+        viewer.saved.connect(self._on_viewer_saved)
+        viewer.closed.connect(self._on_viewer_closed)
+        self.viewers[name] = viewer
+        viewer.show()
+        return viewer
+
+    def _on_viewer_saved(self, name):
+        """Explicit viewer save (Cmd+S / close): reload the main editor
+        when it shows the same notebook (v1 _reload_current_from_disk)."""
+        if name == self.current_notebook:
+            self._reload_current_from_disk()
+
+    def _on_viewer_closed(self, name):
+        self.viewers.pop(name, None)
+
+    def _reload_current_from_disk(self):
+        """v1 _reload_current_from_disk (L2424): re-read notes.txt into
+        the main editor, dropping its pending state."""
+        self._autosave_timer.stop()
+        md = self.marker_doc
+        self._loading = True
+        try:
+            md.load(self.store.load_note_text(self.current_notebook))
+        finally:
+            self._loading = False
+        self._dirty = False
+        self._wc_timer.start()
+        self.url_previews.rescan()
+        self.find_bar.refresh()
+        self.outline.update_outline()
+
+    # ── backup restore (M6) ──────────────────────────────────────────
+
+    def show_restore_backup_dialog(self):
+        """v1 show_restore_backup_dialog (L3436): list this notebook's
+        automatic backups, preview, restore. No backups → alert only."""
+        tr = self.translator.tr
+        nb = self.current_notebook
+        backups = self.store.list_backups(nb)
+        if not backups:
+            dialogs.show_alert(self, tr, tr("restore_title").format(nb),
+                               tr("no_backups"))
+            return
+        dlg = BackupRestoreDialog(self, tr, nb, backups,
+                                  self.store.read_backup,
+                                  THEMES[self.theme_name])
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.selected:
+            self._restore_backup(dlg.selected)
+
+    def _restore_backup(self, filename):
+        """v1 do_restore: snapshot what is being replaced to backups/
+        first, then replace notes.txt and reload the editor."""
+        tr = self.translator.tr
+        nb = self.current_notebook
+        try:
+            content = self.store.read_backup(filename)
+        except OSError as e:
+            dialogs.show_alert(self, tr, tr("warning"), str(e))
+            return
+        # flush pending editor changes so the snapshot below is complete,
+        # then snapshot the current on-disk content (v1 backup_notes)
+        self.save_notes(quick=True)
+        self.store.backup_note(nb, None)
+        self.store.save_note_text(nb, content)
+        self._reload_current_from_disk()
 
     # ── find bar / global search (M5) ────────────────────────────────
 
@@ -1029,6 +1133,17 @@ class MainWindow(QMainWindow):
         nb = self.current_notebook
         if quick and not self._dirty:
             return
+        if not quick and self.viewers:
+            # v1 save_notes L3960-3975: an open viewer of the CURRENT
+            # notebook wins — save it and reload the main editor from it
+            # (v1 _sync_from_viewer); every other open viewer is saved too.
+            viewer = self.viewers.get(nb)
+            if viewer is not None:
+                viewer.save_now()
+                self._reload_current_from_disk()
+            for name, other in self.viewers.items():
+                if name != nb:
+                    other.save_now()
         content = self.marker_doc.serialize()
         store = self.store
         if not quick and os.path.exists(store.note_path(nb)):
@@ -1084,9 +1199,18 @@ class MainWindow(QMainWindow):
             self.close()
 
     def closeEvent(self, event):
-        """v1 on_closing: save everything, wait briefly for the backup
-        thread, then close."""
+        """v1 on_closing: save + destroy the floating viewers first (their
+        signals blocked so the sync-back can't clobber the main editor,
+        like v1's destroy() skipping the WM_DELETE handler), then save
+        everything, wait briefly for the backup thread, and close."""
         self._autosave_timer.stop()
+        for viewer in list(self.viewers.values()):
+            try:
+                viewer.blockSignals(True)
+                viewer.close()  # closeEvent saves its content
+            except Exception as e:
+                print(f"Error closing viewer: {e}")
+        self.viewers.clear()
         try:
             self.save_notes()
         except Exception as e:
