@@ -39,6 +39,16 @@ M7 additions (platform integration):
   object when the attachment exists in this notebook (v1
   paste_internal_link L8096), else falls through (file urls → import,
   otherwise plain text).
+
+v2.0.0 parity addition (cross-notebook rich paste, v1 [INTERNAL:RICH:]
+handle_copy ~L7370 / _insert_serialized_at_cursor ~L7185):
+- copy of a selection containing image/file objects also sets RICH_MIME,
+  a JSON {source_notebook, source_attachments_dir, markers};
+- pasting it into a notebook with a different attachments dir copies the
+  referenced files (and _thumb_ twins) over — internal names kept when
+  free, else re-suffixed with the v1 timestamp+uuid scheme and the
+  markers rewritten — and carries the filename-map entries; missing
+  source files leave their marker as literal text instead of failing.
 """
 
 import json
@@ -160,6 +170,11 @@ class NoteTextEdit(QTextEdit):
     def insertFromMimeData(self, source):
         md = self.marker_doc
         if md.attachments_dir:
+            # Cross-notebook rich paste: the private JSON payload names the
+            # source attachments dir; when it differs from ours the
+            # referenced files are copied over first (v1 RICH branch).
+            if source.hasFormat(RICH_MIME) and self._paste_rich(source):
+                return
             # Our own rich copy: raw marker text round-trips losslessly.
             if source.hasFormat(MARKER_MIME):
                 data = bytes(source.data(MARKER_MIME)).decode("utf-8")
@@ -305,13 +320,91 @@ class NoteTextEdit(QTextEdit):
             cursor.endEditBlock()
         self.setTextCursor(cursor)
 
+    # ── cross-notebook rich paste (v1 _insert_serialized_at_cursor) ──────
+
+    def _paste_rich(self, source):
+        """Paste our private JSON rich payload when it comes from ANOTHER
+        notebook: copy each referenced attachment into this notebook
+        (keeping internal names when free, else re-suffixing with the v1
+        timestamp+uuid scheme and rewriting the marker), carry the
+        filename-map entries, then insert through the marker paste path —
+        one edit block, so undo removes the whole paste. Returns False to
+        fall through (same notebook / malformed payload): the MARKER_MIME
+        fast path handles the in-notebook case."""
+        md = self.marker_doc
+        try:
+            payload = json.loads(bytes(source.data(RICH_MIME))
+                                 .decode("utf-8"))
+            markers = payload["markers"]
+            src_dir = payload.get("source_attachments_dir")
+        except (ValueError, KeyError, TypeError):
+            return False
+        if not isinstance(markers, str) or not markers or not src_dir:
+            return False
+        if os.path.realpath(src_dir) == os.path.realpath(md.attachments_dir):
+            return False  # same notebook: keep the current fast path
+        self._insert_marker_text(self._import_markers(markers, src_dir))
+        return True
+
+    def _import_markers(self, markers, src_dir):
+        """Copy the [IMAGE:name(:w)]/[FILE:name] attachments referenced in
+        *markers* from *src_dir* into this notebook's attachments dir,
+        rewriting markers whose internal name had to change. A missing
+        source file leaves its marker untouched (the paste inserts it
+        as-is instead of failing — v1 ensure_file_in_target)."""
+        md = self.marker_doc
+        src_map = attachments_ui.load_filename_map(src_dir)
+        targets = {}  # source internal name -> target name | None (missing)
+        out = []
+        for part in MARKER_SPLIT_RE.split(markers):
+            if not part:
+                continue
+            m = IMAGE_RE.fullmatch(part) or FILE_RE.fullmatch(part)
+            if m:
+                name = m.group(1)
+                if name not in targets:
+                    try:
+                        targets[name] = attachments_ui.copy_attachment_between(
+                            src_dir, md.attachments_dir, name)
+                    except OSError as e:
+                        print(f"Error copying {name} from source "
+                              f"notebook: {e}")
+                        targets[name] = None
+                    if targets[name] is not None:
+                        self._carry_filename_map(src_map, name, targets[name])
+                target = targets[name]
+                if target is not None and target != name:
+                    part = part.replace(name, target, 1)
+            out.append(part)
+        return "".join(out)
+
+    def _carry_filename_map(self, src_map, src_name, target_name):
+        """Merge the source notebook's filename-map entry under the target
+        internal name so display names / original paths survive the paste
+        (pasted screenshots carry no entry, as v1)."""
+        info = src_map.get(src_name)
+        if isinstance(info, dict):
+            original, path = info.get("name"), info.get("path")
+        else:
+            original, path = info, None
+        if not original:
+            return
+        self.marker_doc.filename_map[target_name] = {"name": original,
+                                                     "path": path}
+        self._notify_saved(target_name, original, path)
+
     # ── copy (v1 handle_copy / copy_with_strikethrough_rtf) ──────────────
 
     def createMimeDataFromSelection(self):
         """v1 handle_copy (L7280-7415): a selected image/file object
         copies the real file plus its [INTERNAL:...] marker text; a
         selection containing [STRIKE] copies rich text/html with <s>
-        spans; anything else keeps the default Qt behavior."""
+        spans; anything else keeps the default Qt behavior. Selections
+        containing image/file objects additionally carry the private JSON
+        rich payload (RICH_MIME) so a paste into another notebook can copy
+        the attachment files over — the plain-text fallback for those is
+        the raw marker text (v1 put the [INTERNAL:RICH:...] wrapper on
+        the plain clipboard)."""
         cursor = self.textCursor()
         if cursor.selectedText() == OBJECT_CHAR:
             cf = self._object_format_at(cursor.selectionStart())
@@ -321,18 +414,41 @@ class NoteTextEdit(QTextEdit):
                 marker = f"[INTERNAL:{kind}:{name}]"
                 path = self.marker_doc.attachment_path(name)
                 if path and os.path.exists(path):
-                    return platform_utils.file_mime_data(path, text=marker)
-                mime = QMimeData()
-                mime.setText(marker)
+                    mime = platform_utils.file_mime_data(path, text=marker)
+                else:
+                    mime = QMimeData()
+                    mime.setText(marker)
+                self._set_rich_payload(mime, self.selection_marker_text())
                 return mime
         marker_text = self.selection_marker_text()
-        if STRIKE_OPEN in marker_text:
+        has_objects = bool(IMAGE_RE.search(marker_text)
+                           or FILE_RE.search(marker_text))
+        if has_objects or STRIKE_OPEN in marker_text:
             mime = QMimeData()
-            mime.setText(strip_markers(marker_text))
-            mime.setHtml(platform_utils.strikethrough_html(marker_text))
+            mime.setText(marker_text if has_objects
+                         else strip_markers(marker_text))
+            if STRIKE_OPEN in marker_text:
+                mime.setHtml(platform_utils.strikethrough_html(marker_text))
             mime.setData(MARKER_MIME, marker_text.encode("utf-8"))
+            if has_objects:
+                self._set_rich_payload(mime, marker_text)
             return mime
         return super().createMimeDataFromSelection()
+
+    def _set_rich_payload(self, mime, marker_text):
+        """Attach the private JSON payload enabling cross-notebook
+        attachment carry-over on paste."""
+        md = self.marker_doc
+        if not md.attachments_dir or not marker_text:
+            return
+        name = (self.notebook_name_provider()
+                if self.notebook_name_provider else None)
+        payload = {"source_notebook": name,
+                   "source_attachments_dir":
+                       os.path.abspath(md.attachments_dir),
+                   "markers": marker_text}
+        mime.setData(RICH_MIME,
+                     json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
     # ── object hit-testing ───────────────────────────────────────────────
 
