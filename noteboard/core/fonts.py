@@ -19,7 +19,9 @@ def system_font():
     """Get the best available system font for the current platform."""
     system = platform.system()
     if system == "Darwin":
-        return "SF Pro Text"
+        # Qt cannot resolve "SF Pro Text" by family name (Tk could); the
+        # dot-name is how Qt addresses the San Francisco system font.
+        return ".AppleSystemUIFont"
     elif system == "Windows":
         return "Segoe UI"
     # Linux: use Helvetica as initial default; the UI layer may refine it

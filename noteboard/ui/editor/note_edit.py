@@ -41,6 +41,7 @@ M7 additions (platform integration):
   otherwise plain text).
 """
 
+import json
 import os
 import re
 import shutil
@@ -81,6 +82,13 @@ STRIKE_TOKEN_RE = re.compile(r'\[STRIKE\]|\[/STRIKE\]')
 # in-board paste keeps full fidelity while external apps see the stripped
 # plain/html payloads.
 MARKER_MIME = "application/x-stellar-noteboard-markers"
+
+# Private clipboard format for selections containing image/file objects:
+# a small JSON {"source_notebook", "source_attachments_dir", "markers"}
+# so a paste into ANOTHER notebook can copy the attachment files over
+# (v1 wrapped the plain clipboard in [INTERNAL:RICH:notebook]... instead,
+# handle_copy ~L7370 / _do_paste ~L7968).
+RICH_MIME = "application/x-stellar-noteboard-rich"
 
 _LINK_MODIFIERS = (Qt.KeyboardModifier.ControlModifier
                    | Qt.KeyboardModifier.MetaModifier

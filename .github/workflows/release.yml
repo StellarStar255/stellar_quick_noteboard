@@ -28,9 +28,9 @@ jobs:
         id: ver
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
-          APP_VERSION="$(grep -oP '^APP_VERSION = "\K[^"]+' QuickNoteBoard.py)"
+          APP_VERSION="$(grep -oP '^APP_VERSION = "\K[^"]+' noteboard/core/version.py)"
           if [ "$TAG_VERSION" != "$APP_VERSION" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match APP_VERSION=$APP_VERSION in QuickNoteBoard.py"
+            echo "::error::Tag $GITHUB_REF_NAME does not match APP_VERSION=$APP_VERSION in noteboard/core/version.py"
             exit 1
           fi
           echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
@@ -46,7 +46,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install pyinstaller pillow
+        run: pip install pyinstaller pyside6 pillow
       - name: Build app bundle
         run: pyinstaller packaging/QuickNoteBoard.spec --noconfirm
       - name: Import signing certificate (if configured)
@@ -91,8 +91,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-tk python3-pip
-          pip3 install pyinstaller pillow
+          sudo apt-get install -y python3-pip libxcb-cursor0
+          pip3 install pyinstaller pyside6 pillow
       - name: Build binary
         run: pyinstaller packaging/QuickNoteBoard.spec --noconfirm
       - name: Build deb
@@ -114,7 +114,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install pyinstaller pillow
+        run: pip install pyinstaller pyside6 pillow
       - name: Build app
         run: pyinstaller packaging/QuickNoteBoard.spec --noconfirm
       - name: Decode signing certificate (if configured)

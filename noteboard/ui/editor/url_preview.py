@@ -51,7 +51,10 @@ class _FetchTask(QRunnable):
             title = self._fetcher(self._url)
         except Exception:
             title = None
-        self._emit(self._url, title or "")
+        try:
+            self._emit(self._url, title or "")
+        except RuntimeError:
+            pass  # app quit while the fetch was in flight; signal source gone
 
 
 class UrlPreviewManager(QObject):

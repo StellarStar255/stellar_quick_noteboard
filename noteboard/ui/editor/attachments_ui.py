@@ -12,6 +12,7 @@ them back on the GUI thread via a queued signal, so the document can swap
 placeholder resources without blocking load.
 """
 
+import json
 import os
 import shutil
 import uuid
@@ -67,6 +68,48 @@ def import_file(file_path, attachments_dir):
     else:
         shutil.copy2(file_path, dest)
     return internal_name, original_name, os.path.abspath(file_path)
+
+
+def load_filename_map(attachments_dir):
+    """Read ``filename_map.json`` from *attachments_dir* (v1
+    load_filename_map L4519 keeps it inside the attachments folder).
+    Missing/corrupt map -> {} — the paste degrades to internal names."""
+    try:
+        with open(os.path.join(attachments_dir, "filename_map.json"),
+                  encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def copy_attachment_between(src_dir, dst_dir, name):
+    """Copy attachment *name* (and its ``_thumb_{name}.png`` cache twin)
+    from *src_dir* into *dst_dir* for a cross-notebook paste (v1
+    _insert_serialized_at_cursor's ensure_file_in_target L7206). The
+    internal name is kept when free in the target, else re-suffixed with
+    the v1 timestamp+uuid scheme. Returns the target internal name, or
+    None when the source file is missing."""
+    src = os.path.join(src_dir, name)
+    if not os.path.exists(src):
+        return None
+    os.makedirs(dst_dir, exist_ok=True)
+    target_name = name
+    if os.path.exists(os.path.join(dst_dir, name)):
+        target_name = internal_file_name(name)
+    dest = os.path.join(dst_dir, target_name)
+    if os.path.isdir(src):
+        shutil.copytree(src, dest)  # .app bundles etc., as import_file
+    else:
+        shutil.copy2(src, dest)
+    thumb_src = os.path.join(src_dir, f"_thumb_{name}.png")
+    if os.path.isfile(thumb_src):
+        try:
+            shutil.copy2(thumb_src,
+                         os.path.join(dst_dir, f"_thumb_{target_name}.png"))
+        except OSError as e:
+            print(f"Error copying thumbnail for {name}: {e}")
+    return target_name
 
 
 def read_image_size(path):

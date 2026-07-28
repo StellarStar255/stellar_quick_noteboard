@@ -1,6 +1,12 @@
 # Stellar Quick Noteboard
 
-A lightweight, cross-platform desktop note-taking app built with Python and Tkinter. Organize notes into notebooks, paste images directly from clipboard, pin the window on top, and switch between Chinese and English UI.
+A lightweight, cross-platform desktop note-taking app built with Python and Qt (PySide6). Organize notes into notebooks, paste images directly from clipboard, pin the window on top, and switch between Chinese and English UI.
+
+> v2.0 is a complete rewrite from Tkinter to Qt for a much faster editor
+> (incremental per-line markdown rendering instead of full-document
+> re-renders). The on-disk data format is unchanged — v1 and v2 open the
+> same notebooks. The legacy Tk implementation is kept as
+> `QuickNoteBoard.py`; the Qt app lives in `noteboard/` (`python -m noteboard`).
 
 ## Features
 
@@ -42,7 +48,9 @@ Installed builds store data in the per-user data directory (`~/Library/Applicati
 ```bash
 git clone https://github.com/StellarStar255/stellar_quick_noteboard
 cd stellar_quick_noteboard
-pip install Pillow
+pip install pyside6 Pillow
+python -m noteboard          # Qt app (v2)
+python QuickNoteBoard.py     # legacy Tk app (v1)
 ```
 
 Platform notes:

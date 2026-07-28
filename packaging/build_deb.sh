@@ -51,7 +51,8 @@ Priority: optional
 Architecture: $ARCH
 Installed-Size: $INSTALLED_SIZE
 Maintainer: StellarStar255 <goosehuangmatt@gmail.com>
-Recommends: fonts-noto-cjk
+Depends: libxcb-cursor0
+Recommends: fonts-noto-cjk, ibus
 Homepage: https://github.com/StellarStar255/stellar_quick_noteboard
 Description: Lightweight desktop note-taking app
  Multiple notebooks, markdown rendering, clipboard image paste,
