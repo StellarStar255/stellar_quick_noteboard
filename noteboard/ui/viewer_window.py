@@ -71,12 +71,16 @@ class ViewerWindow(QMainWindow):
         self.editor.translator = translator
         self.editor.notebook_name_provider = lambda: notebook
         pad = int(cfg.get("text_padding") or 0)
+        # font-size spelled out so an inherited window QSS font change can't
+        # make QTextEdit reset the document's defaultFont (see main_window
+        # _apply_editor_style).
         self.editor.setStyleSheet(
             f"QTextEdit {{ background-color: {theme['text_bg']};"
             f" color: {theme['text_fg']};"
             f" selection-background-color: {theme['text_select_bg']};"
             f" selection-color: {theme['list_select_fg']};"
             f" border: none;"
+            f" font-size: {font_size}pt;"
             f" padding-left: {pad}px; padding-right: {pad}px; }}")
         self.setCentralWidget(self.editor)
 

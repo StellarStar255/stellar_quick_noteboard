@@ -473,13 +473,21 @@ class MainWindow(QMainWindow):
     def _apply_editor_style(self):
         t = THEMES[self.theme_name]
         pad = int(self.cfg.get("text_padding") or 0)
+        note_fs = int(self.cfg.get("font_size") or 12)
+        # font-size must be spelled out here: the window-level QSS carries
+        # the UI font size, and a widget font change makes QTextEdit reset
+        # its document's defaultFont — which silently wiped the A+/A- note
+        # size on startup and on every theme toggle.
         self.editor.setStyleSheet(
             f"QTextEdit {{ background-color: {t['text_bg']};"
             f" color: {t['text_fg']};"
             f" selection-background-color: {t['text_select_bg']};"
             f" selection-color: {t['list_select_fg']};"
             f" border: none;"
+            f" font-size: {note_fs}pt;"
             f" padding-left: {pad}px; padding-right: {pad}px; }}")
+        self.marker_doc.document.setDefaultFont(
+            QFont(system_font(), note_fs))
 
     def toggle_theme(self):
         self._apply_theme("light" if self.theme_name == "dark" else "dark")
@@ -941,7 +949,7 @@ class MainWindow(QMainWindow):
 
     def _set_note_font_size(self, size):
         self.cfg["font_size"] = size
-        self.marker_doc.document.setDefaultFont(QFont(system_font(), size))
+        self._apply_editor_style()  # keeps stylesheet + doc font in sync
         self.highlighter.base_font_size = size
         self.highlighter.set_theme(THEMES[self.theme_name])  # rebuild fmts
         self._schedule_config_save()
