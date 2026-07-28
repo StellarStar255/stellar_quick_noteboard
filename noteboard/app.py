@@ -1,8 +1,10 @@
-"""M3 spike shell: a bare window hosting the new editor stack, with the
-attachments pipeline wired (attachments dir, filename map persistence,
-hardcoded config for image width / name labels).
+"""Application entry point.
 
-Run with:  python -m noteboard <path/to/notes.txt>
+- ``python -m noteboard``                 the real app (M4 shell) on the
+  real data layout (cwd, or the per-user data dir when frozen /
+  STELLAR_NOTEBOARD_DATA_DIR is set — port of v1 __main__ L9571).
+- ``python -m noteboard <notes.txt>``     the M3 single-file spike window
+  (kept for quick editor testing against one file).
 """
 
 import json
@@ -102,11 +104,26 @@ class SpikeWindow(QMainWindow):
 
 def main(argv=None):
     argv = list(sys.argv if argv is None else argv)
-    if len(argv) < 2:
-        print("usage: python -m noteboard <path/to/notes.txt>",
-              file=sys.stderr)
-        return 2
+    if len(argv) >= 2:
+        # Single-file spike mode (M3), kept behind the file argument.
+        app = QApplication(argv)
+        window = SpikeWindow(argv[1])
+        window.show()
+        return app.exec()
+
+    # Real app. Installed (frozen) builds keep user data in a per-user
+    # directory; running from source uses the cwd (v1 __main__ L9571).
+    from noteboard.core.paths import user_data_dir
+    from noteboard.core.storage import NoteStore
+    from noteboard.core.version import IS_FROZEN
+
+    if IS_FROZEN or os.environ.get("STELLAR_NOTEBOARD_DATA_DIR"):
+        data_dir = user_data_dir()
+        os.makedirs(data_dir, exist_ok=True)
+        os.chdir(data_dir)
+
     app = QApplication(argv)
-    window = SpikeWindow(argv[1])
+    from noteboard.ui.main_window import MainWindow
+    window = MainWindow(NoteStore("."))
     window.show()
     return app.exec()
