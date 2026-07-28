@@ -13,24 +13,58 @@ M3 additions (ported from QuickNoteBoard.py):
 - image double-click opens the viewer (open_image_viewer ~L8558), file
   chips single-click select / double-click open (insert_file_link);
 - object context menu: Open / Copy Path / Delete (full menu is M5/M6).
+
+M5 additions (editing interactions):
+- text context menu (show_text_context_menu L4929): cut/copy/paste,
+  strikethrough toggle, highlight submenu, save-selection-as-notebook,
+  copy-notebook-link; inapplicable items are grayed out, never hidden;
+- highlight / strikethrough as marker-text edits (apply_highlight L5055,
+  _toggle_line_highlight L5087, apply_strikethrough L5130): wrap with
+  [HL:color]..[/HL] / [STRIKE]..[/STRIKE], one undo step each;
+  Cmd/Ctrl+1..5 toggle the line highlight;
+- task checkbox click toggles "- [ ]"/"- [x]" (_on_task_box_click L5523);
+- [[notebook]] links and URLs open on Cmd/Ctrl/Alt+click (L5912, L9377);
+- Tab/Shift+Tab multi-line indent/unindent (handle_tab L7862);
+- cursor jump-over for ephemeral (never-serialized) lines.
 """
 
 import os
+import re
 
-from PySide6.QtCore import QElapsedTimer, QPoint, QRectF, Qt, QUrl
+from PySide6.QtCore import QElapsedTimer, QPoint, QRectF, Qt, QUrl, Signal
 from PySide6.QtGui import (QDesktopServices, QImage, QTextCharFormat,
                            QTextCursor)
 from PySide6.QtWidgets import QApplication, QMenu, QTextEdit
 
 from noteboard.core.attachments import generate_video_thumbnail, is_video_file
+from noteboard.core.i18n import Translator
+from noteboard.core.markers import (HL_CLOSE, HL_OPEN_RE, NOTEBOOK_LINK_RE,
+                                    STRIKE_CLOSE, STRIKE_OPEN, TASK_RE,
+                                    URL_RE, strip_markers)
+from noteboard.core.theme import HIGHLIGHT_NAMES
 from noteboard.ui.editor import attachments_ui
-from noteboard.ui.editor.document import (MAX_IMAGE_WIDTH, MIN_IMAGE_WIDTH,
-                                          OBJECT_CHAR, PROP_FILE_LINK,
+from noteboard.ui.editor.document import (LINE_SEP, MAX_IMAGE_WIDTH,
+                                          MIN_IMAGE_WIDTH, OBJECT_CHAR,
+                                          PROP_EPHEMERAL, PROP_FILE_LINK,
+                                          PROP_IMAGE_WIDTH,
                                           PROP_INTERNAL_NAME)
+from noteboard.ui.editor.highlighter import _HL_MASK, _HL_SHIFT
 
 EDGE_THRESHOLD = 25   # v1 get_image_resize_edge
 EDGE_TOLERANCE = 10   # v1 in_x_range/in_y_range slack
 MOTION_THROTTLE_MS = 50
+
+# Style-marker tokens as they appear literally in the document text.
+HL_TOKEN_RE = re.compile(r'\[HL:\w+\]|\[/HL\]')
+STRIKE_TOKEN_RE = re.compile(r'\[STRIKE\]|\[/STRIKE\]')
+
+_LINK_MODIFIERS = (Qt.KeyboardModifier.ControlModifier
+                   | Qt.KeyboardModifier.MetaModifier
+                   | Qt.KeyboardModifier.AltModifier)
+_NAV_FORWARD = frozenset((Qt.Key.Key_Down, Qt.Key.Key_Right,
+                          Qt.Key.Key_PageDown))
+_NAV_BACKWARD = frozenset((Qt.Key.Key_Up, Qt.Key.Key_Left,
+                           Qt.Key.Key_PageUp))
 
 
 class _ObjectHit:
@@ -48,12 +82,20 @@ class _ObjectHit:
 
 class NoteTextEdit(QTextEdit):
 
+    #: selection's marker text, for the "save as new notebook" flow
+    save_selection_as_notebook = Signal(str)
+    #: [[notebook]] link activated with Cmd/Ctrl/Alt+click
+    notebook_link_clicked = Signal(str)
+
     def __init__(self, marker_doc, highlighter, parent=None):
         super().__init__(parent)
         self.marker_doc = marker_doc
         self.highlighter = highlighter
         self.setDocument(marker_doc.document)
         self.setAcceptRichText(False)
+        # App wiring (main_window overrides; defaults keep tests standalone)
+        self.translator = Translator()
+        self.notebook_name_provider = None  # callable() -> current nb name
         self._cursor_block = -1
         self.cursorPositionChanged.connect(self._on_cursor_moved)
         self._on_cursor_moved()
@@ -276,12 +318,38 @@ class NoteTextEdit(QTextEdit):
                 shape = Qt.CursorShape.SizeVerCursor
             elif hit.rect.contains(pos.x(), pos.y()):
                 shape = Qt.CursorShape.PointingHandCursor
+        elif self._interactive_span_at(pos):
+            # task checkbox / URL / [[notebook]] link (v1 hand2 tag binds)
+            shape = Qt.CursorShape.PointingHandCursor
         self.viewport().setCursor(shape)
+
+    def _interactive_span_at(self, pos):
+        """True when *pos* is over a task checkbox, URL or notebook link."""
+        cursor = self.cursorForPosition(pos)
+        col = cursor.positionInBlock()
+        text = cursor.block().text()
+        m = TASK_RE.match(text)
+        if m and len(m.group(1)) <= col <= m.end(3) + 1:
+            return True
+        for regex in (URL_RE, NOTEBOOK_LINK_RE):
+            for m in regex.finditer(text):
+                if m.start() <= col <= m.end():
+                    return True
+        return False
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position().toPoint()
+            if event.modifiers() & _LINK_MODIFIERS:
+                if self._activate_link_at(pos):
+                    event.accept()
+                    return
             hit = self._hit_object(pos)
+            if (hit is None
+                    and event.modifiers() == Qt.KeyboardModifier.NoModifier
+                    and self._toggle_task_at(pos)):
+                event.accept()
+                return
             if hit is not None:
                 edge = (None if hit.is_file
                         else self._resize_edge(pos, hit.rect))
@@ -371,6 +439,46 @@ class NoteTextEdit(QTextEdit):
                 lambda *_: self._viewers.remove(viewer)
                 if viewer in self._viewers else None)
 
+    # ── links & task checkboxes ──────────────────────────────────────────
+
+    def _activate_link_at(self, pos):
+        """Cmd/Ctrl/Alt+click on a URL opens it (v1 L9377); on a
+        [[notebook]] link emits notebook_link_clicked (v1 L5912)."""
+        cursor = self.cursorForPosition(pos)
+        col = cursor.positionInBlock()
+        text = cursor.block().text()
+        for m in URL_RE.finditer(text):
+            if m.start() <= col <= m.end():
+                QDesktopServices.openUrl(QUrl(m.group(1)))
+                return True
+        for m in NOTEBOOK_LINK_RE.finditer(text):
+            if m.start() <= col <= m.end():
+                self.notebook_link_clicked.emit(m.group(1))
+                return True
+        return False
+
+    def _toggle_task_at(self, pos):
+        """Toggle a - [ ] / - [x] checkbox when its marker span is clicked
+        (v1 _on_task_box_click L5577). One undo step."""
+        cursor = self.cursorForPosition(pos)
+        block = cursor.block()
+        col = cursor.positionInBlock()
+        m = TASK_RE.match(block.text())
+        if not m:
+            return False
+        indent = len(m.group(1))
+        if not (indent <= col <= m.end(3) + 1):  # box span through ']'
+            return False
+        state_pos = block.position() + m.start(3)
+        new_state = ' ' if m.group(3) in 'xX' else 'x'
+        c = QTextCursor(self.document())
+        c.setPosition(state_pos)
+        c.setPosition(state_pos + 1, QTextCursor.MoveMode.KeepAnchor)
+        c.beginEditBlock()
+        c.insertText(new_state, QTextCharFormat())
+        c.endEditBlock()
+        return True
+
     # ── context menu / delete ────────────────────────────────────────────
 
     def contextMenuEvent(self, event):
@@ -378,7 +486,10 @@ class NoteTextEdit(QTextEdit):
         if hit is not None and hit.rect.contains(event.pos().x(),
                                                  event.pos().y()):
             # Placeholder attachment menu — the full v1 menu set (copy
-            # link/file, reveal, …) arrives with M5/M6.
+            # link/file, reveal, …) arrives with M6. Accepting the event
+            # here is the Qt equivalent of v1's "break" fix: only ONE
+            # menu may show for a click.
+            event.accept()
             menu = QMenu(self)
             menu.addAction("Open", lambda: self._open_object(hit))
             menu.addAction("Copy Path", lambda: self._copy_path(hit))
@@ -387,7 +498,79 @@ class NoteTextEdit(QTextEdit):
                 hit.position, hit.is_file))
             menu.exec(event.globalPos())
             return
-        super().contextMenuEvent(event)
+        self._show_text_context_menu(event)
+
+    def _show_text_context_menu(self, event):
+        event.accept()
+        menu = self.build_text_context_menu(event.pos())
+        menu.exec(event.globalPos())
+
+    def build_text_context_menu(self, pos):
+        """v1 show_text_context_menu (L4929): stable structure — items
+        that don't apply are grayed out, never hidden. Split from the
+        exec() call so tests can inspect the menu."""
+        tr = self.translator.tr
+        cursor = self.textCursor()
+        has_sel = cursor.hasSelection()
+        if not has_sel:
+            # v1 places the cursor at the right-click position first.
+            self.setTextCursor(self.cursorForPosition(pos))
+            cursor = self.textCursor()
+
+        menu = QMenu(self)
+
+        # Clipboard: cut/copy need a selection, paste needs content
+        act = menu.addAction(tr("ctx_cut"), self.cut)
+        act.setEnabled(has_sel)
+        act = menu.addAction(tr("ctx_copy"), self.copy)
+        act.setEnabled(has_sel)
+        md = QApplication.clipboard().mimeData()
+        act = menu.addAction(tr("ctx_paste"), self.paste)
+        act.setEnabled(bool(md and (md.hasText() or md.hasImage()
+                                    or md.hasUrls())))
+        menu.addSeparator()
+
+        # Strikethrough toggle; label reflects the state at the selection
+        has_strike = has_sel and self._strike_open_at(cursor.selectionStart())
+        if has_strike:
+            menu.addAction(tr("remove_strike"), self.remove_strikethrough)
+        else:
+            act = menu.addAction(tr("strikethrough"), self.apply_strikethrough)
+            act.setEnabled(has_sel)
+        menu.addSeparator()
+
+        # Highlight submenu: 5 colors + remove
+        hl_menu = menu.addMenu(tr("highlight_menu"))
+        for color in HIGHLIGHT_NAMES:
+            cmd = ((lambda c=color: self.apply_highlight(c)) if has_sel
+                   else (lambda c=color: self.toggle_line_highlight(c)))
+            hl_menu.addAction(tr(f"hl_{color}"), cmd)
+        doc = self.document()
+        first = doc.findBlock(cursor.selectionStart()).blockNumber()
+        last = doc.findBlock(cursor.selectionEnd()).blockNumber()
+        has_hl = any(self._line_has_any_highlight(doc.findBlockByNumber(n))
+                     for n in range(first, last + 1))
+        act = hl_menu.addAction(tr("remove_highlight"), self.remove_highlight)
+        act.setEnabled(has_hl)
+        menu.addSeparator()
+
+        act = menu.addAction(tr("save_as_nb"), self._emit_save_selection)
+        act.setEnabled(has_sel)
+        act = menu.addAction(tr("copy_nb_link"), self.copy_notebook_link)
+        act.setEnabled(self.notebook_name_provider is not None)
+        return menu
+
+    def _emit_save_selection(self):
+        content = self.selection_marker_text()
+        if content.strip():
+            self.save_selection_as_notebook.emit(content)
+
+    def copy_notebook_link(self):
+        """v1 copy_notebook_link (L4987): copy [[current notebook]]."""
+        if self.notebook_name_provider is None:
+            return
+        name = self.notebook_name_provider()
+        QApplication.clipboard().setText(f"[[{name}]]")
 
     def _copy_path(self, hit):
         path = self.marker_doc.attachment_path(hit.name)
@@ -433,13 +616,348 @@ class NoteTextEdit(QTextEdit):
             it += 1
         return saw
 
+    # ── strikethrough / highlight (marker-text edits) ────────────────────
+    #
+    # v1 kept these as Tk tags (apply_highlight L5055, apply_strikethrough
+    # L5130, _toggle_line_highlight L5087) that serialized to [HL:]/[STRIKE]
+    # markers on save. In v2 the document text IS the marker text, so the
+    # commands edit the markers directly — each command one undo step.
+
+    def _doc_text(self):
+        return self.document().toPlainText()
+
+    def _strike_open_at(self, pos):
+        """True when the char at *pos* falls inside an open [STRIKE] span."""
+        last = None
+        for m in STRIKE_TOKEN_RE.finditer(self._doc_text(), 0, pos):
+            last = m.group(0)
+        return last == STRIKE_OPEN
+
+    def _strip_tokens(self, regex, start, end):
+        """Remove all *regex* tokens fully inside [start, end); returns the
+        number of characters removed."""
+        doc = self.document()
+        spans = [(m.start(), m.end())
+                 for m in regex.finditer(self._doc_text(), start, end)]
+        for s, e in reversed(spans):
+            c = QTextCursor(doc)
+            c.setPosition(s)
+            c.setPosition(e, QTextCursor.MoveMode.KeepAnchor)
+            c.removeSelectedText()
+        return sum(e - s for s, e in spans)
+
+    def apply_strikethrough(self):
+        """Wrap the selection in [STRIKE]..[/STRIKE] (v1 apply_strikethrough
+        L5130). Same-type markers inside the range are stripped first."""
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            return
+        start, end = cursor.selectionStart(), cursor.selectionEnd()
+        doc = self.document()
+        edit = QTextCursor(doc)
+        edit.beginEditBlock()
+        try:
+            end -= self._strip_tokens(STRIKE_TOKEN_RE, start, end)
+            c = QTextCursor(doc)
+            c.setPosition(end)
+            c.insertText(STRIKE_CLOSE, QTextCharFormat())
+            c.setPosition(start)
+            c.insertText(STRIKE_OPEN, QTextCharFormat())
+        finally:
+            edit.endEditBlock()
+
+    def remove_strikethrough(self):
+        """Strip [STRIKE] markers from the selection (v1 remove_strikethrough
+        L5138). When the selection sits inside a larger span, the span is
+        split around it — matching what v1's tag_remove serialized."""
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            return
+        start, end = cursor.selectionStart(), cursor.selectionEnd()
+        doc = self.document()
+        edit = QTextCursor(doc)
+        edit.beginEditBlock()
+        try:
+            open_at_start = self._strike_open_at(start)
+            end -= self._strip_tokens(STRIKE_TOKEN_RE, start, end)
+            open_at_end = self._strike_open_at(end)
+            c = QTextCursor(doc)
+            if open_at_end:
+                c.setPosition(end)
+                c.insertText(STRIKE_OPEN, QTextCharFormat())
+            if open_at_start:
+                c.setPosition(start)
+                c.insertText(STRIKE_CLOSE, QTextCharFormat())
+            added = ((len(STRIKE_OPEN) if open_at_end else 0)
+                     + (len(STRIKE_CLOSE) if open_at_start else 0))
+            self._strip_empty_strike_pairs(start, end + added)
+        finally:
+            edit.endEditBlock()
+
+    def _strip_empty_strike_pairs(self, start, end):
+        """Remove no-op "[STRIKE][/STRIKE]" pairs on the lines touched."""
+        doc = self.document()
+        lo = doc.findBlock(max(0, start)).position()
+        b = doc.findBlock(min(end, doc.characterCount() - 1))
+        hi = b.position() + max(b.length() - 1, 0)
+        text = self._doc_text()
+        pair = STRIKE_OPEN + STRIKE_CLOSE
+        spans = []
+        i = text.find(pair, lo)
+        while i != -1 and i < hi:
+            spans.append((i, i + len(pair)))
+            i = text.find(pair, i + len(pair))
+        for s, e in reversed(spans):
+            c = QTextCursor(doc)
+            c.setPosition(s)
+            c.setPosition(e, QTextCursor.MoveMode.KeepAnchor)
+            c.removeSelectedText()
+
+    def _line_has_color(self, block, color):
+        """Line already carries highlight *color* (its own open marker or a
+        span carried in from a previous line via the highlighter state)."""
+        if f"[HL:{color}]" in block.text():
+            return True
+        prev = block.previous()
+        state = prev.userState() if prev.isValid() else -1
+        if state > 0:
+            idx = (state >> _HL_SHIFT) & _HL_MASK
+            return idx == HIGHLIGHT_NAMES.index(color) + 1
+        return False
+
+    def _line_has_any_highlight(self, block):
+        if not block.isValid():
+            return False
+        if HL_OPEN_RE.search(block.text()):
+            return True
+        prev = block.previous()
+        state = prev.userState() if prev.isValid() else -1
+        return state > 0 and ((state >> _HL_SHIFT) & _HL_MASK) > 0
+
+    def apply_highlight(self, color):
+        """Highlight the selection's lines with *color* (v1 apply_highlight
+        L5055: line-granular, existing colors replaced)."""
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            return
+        self._highlight_lines(cursor.selectionStart(), cursor.selectionEnd(),
+                              color, toggle=False)
+
+    def remove_highlight(self):
+        """Strip highlight markers from the selection's lines (or the
+        cursor line) — v1 remove_highlight / _toggle_line_highlight_remove."""
+        cursor = self.textCursor()
+        self._highlight_lines(cursor.selectionStart(), cursor.selectionEnd(),
+                              None, toggle=False)
+
+    def toggle_line_highlight(self, color):
+        """Cmd/Ctrl+1..5 (v1 _toggle_line_highlight L5087): toggle *color*
+        on the cursor line or the selected lines; off only when every
+        non-empty line already has it."""
+        cursor = self.textCursor()
+        self._highlight_lines(cursor.selectionStart(), cursor.selectionEnd(),
+                              color, toggle=True)
+
+    def _highlight_lines(self, start, end, color, toggle):
+        doc = self.document()
+        first = doc.findBlock(start).blockNumber()
+        last = doc.findBlock(end).blockNumber()
+        numbers = [n for n in range(first, last + 1)
+                   if not self._block_is_ephemeral(doc.findBlockByNumber(n))]
+        if not numbers:
+            return
+        wrap = color is not None
+        if toggle and wrap:
+            # off only when ALL non-empty lines already carry this color
+            all_have = True
+            for n in numbers:
+                block = doc.findBlockByNumber(n)
+                if not strip_markers(block.text()).strip():
+                    continue
+                if not self._line_has_color(block, color):
+                    all_have = False
+                    break
+            wrap = not all_have
+        edit = QTextCursor(doc)
+        edit.beginEditBlock()
+        try:
+            for n in reversed(numbers):  # last→first keeps positions valid
+                block = doc.findBlockByNumber(n)
+                base = block.position()
+                spans = [(m.start(), m.end())
+                         for m in HL_TOKEN_RE.finditer(block.text())]
+                for s, e in reversed(spans):
+                    c = QTextCursor(doc)
+                    c.setPosition(base + s)
+                    c.setPosition(base + e, QTextCursor.MoveMode.KeepAnchor)
+                    c.removeSelectedText()
+                if wrap:
+                    block = doc.findBlockByNumber(n)
+                    text = block.text()
+                    if not strip_markers(text).strip():
+                        continue  # v1 skips empty lines
+                    c = QTextCursor(doc)
+                    c.setPosition(block.position() + len(text))
+                    c.insertText(HL_CLOSE, QTextCharFormat())
+                    c.setPosition(block.position())
+                    c.insertText(f"[HL:{color}]", QTextCharFormat())
+        finally:
+            edit.endEditBlock()
+
+    # ── selection as marker text ─────────────────────────────────────────
+
+    def selection_marker_text(self):
+        """The selection serialized to marker text (v1
+        _get_selected_content_with_markers L5148): objects re-emit their
+        [IMAGE:]/[FILE:] markers, ephemeral lines/labels are skipped."""
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            return ""
+        start, end = cursor.selectionStart(), cursor.selectionEnd()
+        doc = self.document()
+        parts = []
+        block = doc.findBlock(start)
+        while block.isValid() and block.position() < end:
+            texts = []
+            saw_fragment = False
+            all_ephemeral = True
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if frag.isValid():
+                    fs = frag.position()
+                    fe = fs + frag.length()
+                    if fe > start and fs < end:
+                        saw_fragment = True
+                        cf = frag.charFormat()
+                        if not cf.hasProperty(PROP_EPHEMERAL):
+                            all_ephemeral = False
+                            texts.append(
+                                self._clip_fragment(frag, cf, start, end))
+                it += 1
+            if not (saw_fragment and all_ephemeral):
+                parts.append("".join(texts))
+            block = block.next()
+        return "\n".join(parts)
+
+    @staticmethod
+    def _clip_fragment(frag, cf, start, end):
+        """Marker text for the part of *frag* inside [start, end)."""
+        fs = frag.position()
+        text = frag.text()
+        sub = text[max(start - fs, 0):min(end - fs, len(text))]
+        if cf.hasProperty(PROP_FILE_LINK):
+            name = cf.property(PROP_INTERNAL_NAME)
+            return f"[FILE:{name}]" * sub.count(OBJECT_CHAR)
+        if cf.isImageFormat():
+            name = cf.property(PROP_INTERNAL_NAME)
+            if name is None:
+                return ""
+            width = int(cf.property(PROP_IMAGE_WIDTH) or 0)
+            marker = (f"[IMAGE:{name}:{width}]" if width > 0
+                      else f"[IMAGE:{name}]")
+            return marker * sub.count(OBJECT_CHAR)
+        return sub.replace(LINE_SEP, "\n").replace(OBJECT_CHAR, "")
+
     # ── keys ─────────────────────────────────────────────────────────────
 
     def keyPressEvent(self, event):
-        # v1 handle_tab basic case; multi-line indent comes in M5.
-        if (event.key() == Qt.Key.Key_Tab
-                and event.modifiers() == Qt.KeyboardModifier.NoModifier):
-            self.textCursor().insertText("    ")
+        key = event.key()
+        mods = event.modifiers()
+        # v1 handle_tab (L7862): multi-line selection indents each line;
+        # otherwise insert 4 spaces at the cursor.
+        if key == Qt.Key.Key_Tab and mods == Qt.KeyboardModifier.NoModifier:
+            if self._selection_spans_lines():
+                self.indent_selection()
+            else:
+                self.textCursor().insertText("    ")
+            event.accept()
+            return
+        # v1 handle_shift_tab (L7888): Shift+Tab arrives as Backtab.
+        if key == Qt.Key.Key_Backtab:
+            self.unindent_selection()
+            event.accept()
+            return
+        # Cmd/Ctrl+1..5: quick line highlight (v1 setup_undo_redo L4858)
+        if (mods & Qt.KeyboardModifier.ControlModifier
+                and Qt.Key.Key_1 <= key <= Qt.Key.Key_5):
+            self.toggle_line_highlight(HIGHLIGHT_NAMES[key - Qt.Key.Key_1])
             event.accept()
             return
         super().keyPressEvent(event)
+        if key in _NAV_FORWARD or key in _NAV_BACKWARD:
+            self._jump_over_ephemeral(
+                key, bool(mods & Qt.KeyboardModifier.ShiftModifier))
+
+    def _jump_over_ephemeral(self, key, keep_anchor):
+        """Keep the cursor out of ephemeral lines (URL previews, labels):
+        after a movement key lands inside one, hop over it."""
+        cursor = self.textCursor()
+        block = cursor.block()
+        if not self._block_is_ephemeral(block):
+            return
+        forward = key in _NAV_FORWARD
+        b = block.next() if forward else block.previous()
+        while b.isValid() and self._block_is_ephemeral(b):
+            b = b.next() if forward else b.previous()
+        if not b.isValid():  # hit the document edge: bounce back
+            b = block.previous() if forward else block.next()
+            while b.isValid() and self._block_is_ephemeral(b):
+                b = b.previous() if forward else b.next()
+            if not b.isValid():
+                return
+        target = (b.position() if b.blockNumber() > block.blockNumber()
+                  else b.position() + max(b.length() - 1, 0))
+        mode = (QTextCursor.MoveMode.KeepAnchor if keep_anchor
+                else QTextCursor.MoveMode.MoveAnchor)
+        cursor.setPosition(target, mode)
+        self.setTextCursor(cursor)
+
+    def _selection_spans_lines(self):
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            return False
+        doc = self.document()
+        return (doc.findBlock(cursor.selectionStart()).blockNumber()
+                != doc.findBlock(cursor.selectionEnd()).blockNumber())
+
+    def indent_selection(self):
+        """Indent the selected lines (or the cursor line) by 4 spaces —
+        one undo step (v1 handle_tab / indent_text)."""
+        doc = self.document()
+        cursor = self.textCursor()
+        first = doc.findBlock(cursor.selectionStart()).blockNumber()
+        last = doc.findBlock(cursor.selectionEnd()).blockNumber()
+        edit = QTextCursor(doc)
+        edit.beginEditBlock()
+        try:
+            for n in range(first, last + 1):
+                block = doc.findBlockByNumber(n)
+                edit.setPosition(block.position())
+                edit.insertText("    ", QTextCharFormat())
+        finally:
+            edit.endEditBlock()
+
+    def unindent_selection(self):
+        """Remove up to 4 leading spaces from each selected line (or the
+        cursor line) — one undo step (v1 handle_shift_tab)."""
+        doc = self.document()
+        cursor = self.textCursor()
+        first = doc.findBlock(cursor.selectionStart()).blockNumber()
+        last = doc.findBlock(cursor.selectionEnd()).blockNumber()
+        edit = QTextCursor(doc)
+        edit.beginEditBlock()
+        try:
+            for n in range(first, last + 1):
+                block = doc.findBlockByNumber(n)
+                text = block.text()
+                count = 0
+                while count < min(4, len(text)) and text[count] == ' ':
+                    count += 1
+                if count:
+                    edit.setPosition(block.position())
+                    edit.setPosition(block.position() + count,
+                                     QTextCursor.MoveMode.KeepAnchor)
+                    edit.removeSelectedText()
+        finally:
+            edit.endEditBlock()

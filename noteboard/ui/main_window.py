@@ -9,17 +9,18 @@ config load/save, autosave, i18n and theming — on top of the M1-M3 core
 import os
 import platform
 import re
+import shutil
 from datetime import datetime
 
 from PySide6.QtCore import QThreadPool, QTimer, Qt
 from PySide6.QtGui import (QCursor, QFont, QGuiApplication, QKeySequence,
-                           QShortcut, QTextCursor)
+                           QShortcut, QTextCharFormat, QTextCursor)
 from PySide6.QtWidgets import (QCheckBox, QDialog, QFileDialog, QLabel,
                                QMainWindow, QMenu, QPlainTextEdit, QSplitter,
                                QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from noteboard.core import export as export_core
-from noteboard.core.attachments import cleanup_unused
+from noteboard.core.attachments import cleanup_unused, referenced_attachments
 from noteboard.core.fonts import mono_font, system_font
 from noteboard.core.markers import strip_markers
 from noteboard.core.paths import atomic_write_text
@@ -31,6 +32,9 @@ from noteboard.ui import dialogs
 from noteboard.ui.editor.document import MarkerDocument
 from noteboard.ui.editor.highlighter import MarkdownHighlighter
 from noteboard.ui.editor.note_edit import NoteTextEdit
+from noteboard.ui.editor.url_preview import UrlPreviewManager
+from noteboard.ui.find_bar import FindBar
+from noteboard.ui.global_search import GlobalSearchDialog
 from noteboard.ui.qss import build_qss
 from noteboard.ui.recycle_box import RecycleBox
 from noteboard.ui.sidebar import Sidebar
@@ -133,10 +137,9 @@ class MainWindow(QMainWindow):
         spacer.setStyleSheet("background: transparent;")
         self.toolbar.addWidget(spacer)
 
-        self.btn_search = self._tool_btn("", None)
-        self.btn_search.setEnabled(False)   # in-note search arrives in M5
+        self.btn_search = self._tool_btn("", self.toggle_find_bar)
         self.btn_outline = self._tool_btn("", None)
-        self.btn_outline.setEnabled(False)  # outline panel arrives in M5
+        self.btn_outline.setEnabled(False)  # outline panel arrives later
         self.btn_save = self._tool_btn("", self.save_notes)
         self.btn_history = self._tool_btn("", self.show_history)
         self.btn_notebook = self._tool_btn("", self.show_notebook_menu)
@@ -190,9 +193,25 @@ class MainWindow(QMainWindow):
             base_font_size=int(self.cfg.get("font_size") or 12),
             mono_family=mono_font())
         self.editor = NoteTextEdit(self.marker_doc, self.highlighter, right)
+        self.editor.translator = self.translator
+        self.editor.notebook_name_provider = lambda: self.current_notebook
+        self.editor.save_selection_as_notebook.connect(
+            self.save_selection_as_notebook)
+        self.editor.notebook_link_clicked.connect(self.open_notebook_link)
+
+        # In-note find/replace bar, hidden above the editor (M5)
+        self.find_bar = FindBar(self.editor, self.translator, right)
+        right_layout.addWidget(self.find_bar)
         right_layout.addWidget(self.editor, 1)
         doc.contentsChanged.connect(self._on_content_changed)
         self.editor.selectionChanged.connect(self._wc_timer.start)
+
+        # URL title previews (ephemeral lines, never serialized)
+        self.url_previews = UrlPreviewManager(
+            self.marker_doc,
+            cache=self.store.load_url_title_cache(),
+            save_cache=self.store.save_url_title_cache,
+            parent=self)
 
         self.splitter.addWidget(right)
         self.splitter.setStretchFactor(0, 0)
@@ -213,6 +232,12 @@ class MainWindow(QMainWindow):
         save.activated.connect(self.save_notes)
         quit_sc = QShortcut(QKeySequence("Ctrl+Q"), self)
         quit_sc.activated.connect(self._confirm_quit)
+        find_sc = QShortcut(QKeySequence(QKeySequence.StandardKey.Find), self)
+        find_sc.activated.connect(self.toggle_find_bar)
+        # Global search: Cmd+G / Ctrl+Shift+F (v1 setup_paste_binding L4816)
+        for seq in ("Ctrl+G", "Ctrl+Shift+F"):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.activated.connect(self.show_global_search)
 
         self.resize(400, 300)  # v1 default geometry, config may override
         self.retranslate()
@@ -362,6 +387,7 @@ class MainWindow(QMainWindow):
         cursor = self.editor.textCursor()
         cursor.setPosition(min(pos, max(0, md.document.characterCount() - 1)))
         self.editor.setTextCursor(cursor)
+        self.url_previews.rescan()  # reload dropped the ephemeral previews
 
     # ── i18n ─────────────────────────────────────────────────────────
 
@@ -388,6 +414,7 @@ class MainWindow(QMainWindow):
         self.btn_lang.setText(tr("lang_toggle"))
         self.sidebar.retranslate()
         self.recycle.retranslate()
+        self.find_bar.retranslate()
         self._update_status_notebook()
         self._update_word_count()
 
@@ -417,6 +444,8 @@ class MainWindow(QMainWindow):
         self._update_status_notebook()
         self._refresh_sidebar()
         self._wc_timer.start()
+        self.url_previews.rescan()  # cached titles now, fetch the rest
+        self.find_bar.refresh()
         self.editor.setFocus()
 
     def switch_notebook(self, name):
@@ -665,7 +694,7 @@ class MainWindow(QMainWindow):
         act.setEnabled(can_delete)
         menu.addSeparator()
         menu.addAction(tr("sort_manage"), self.show_order_dialog)
-        menu.addAction(tr("global_search")).setEnabled(False)   # M5
+        menu.addAction(tr("global_search"), self.show_global_search)
         menu.addSeparator()
         menu.addAction(tr("export_nb"), lambda: self.export_notebook())
         menu.addAction(tr("export_md"), self.export_notebook_markdown)
@@ -787,20 +816,114 @@ class MainWindow(QMainWindow):
 
     def indent_text(self):
         """v1 indent_text: indent selected lines (or the current line)."""
-        cursor = self.editor.textCursor()
-        doc = self.marker_doc.document
-        start_block = doc.findBlock(cursor.selectionStart())
-        end_block = doc.findBlock(cursor.selectionEnd())
-        edit = QTextCursor(doc)
-        edit.beginEditBlock()
-        block = start_block
+        self.editor.indent_selection()
+
+    # ── find bar / global search (M5) ────────────────────────────────
+
+    def toggle_find_bar(self):
+        """v1 _toggle_search_bar: Cmd/Ctrl+F or the 搜索 button."""
+        self.find_bar.toggle_bar()
+
+    def show_global_search(self):
+        """v1 show_global_search (L6340)."""
+        dlg = GlobalSearchDialog(self, self.translator.tr, self.store,
+                                 self.current_notebook,
+                                 self.marker_doc.serialize,
+                                 THEMES[self.theme_name])
+        dlg.open_notebook_at.connect(self._on_global_search_jump)
+        dlg.exec()
+
+    def _on_global_search_jump(self, nb, line_no, needle):
+        """v1 _global_search_jump (L6555): switch to the notebook, select
+        the match on its line, and open the find bar on the query."""
+        if nb != self.current_notebook:
+            self.switch_notebook(nb)
+        block = self._nth_content_block(line_no)
+        if block is None:
+            return
+        cursor = QTextCursor(self.marker_doc.document)
+        cursor.setPosition(block.position())
+        if needle:
+            idx = block.text().lower().find(needle.lower())
+            if idx >= 0:
+                cursor.setPosition(block.position() + idx)
+                cursor.setPosition(block.position() + idx + len(needle),
+                                   QTextCursor.MoveMode.KeepAnchor)
+        self.editor.setTextCursor(cursor)
+        self.editor.ensureCursorVisible()
+        if self.find_bar.isVisible():
+            self.find_bar.refresh()
+        else:
+            self.find_bar.show_bar()  # prefills from the fresh selection
+
+    def _nth_content_block(self, line_no):
+        """The document block for 0-based *content* line *line_no* —
+        ephemeral blocks (URL previews, image labels) don't count, since
+        search ran over the serialized text."""
+        block = self.marker_doc.document.begin()
+        n = 0
         while block.isValid():
-            edit.setPosition(block.position())
-            edit.insertText("    ")
-            if block == end_block:
-                break
+            if not self.editor._block_is_ephemeral(block):
+                if n == line_no:
+                    return block
+                n += 1
             block = block.next()
-        edit.endEditBlock()
+        return None
+
+    # ── save selection as notebook / notebook links (M5) ─────────────
+
+    def save_selection_as_notebook(self, content):
+        """v1 save_selection_as_notebook (L5294): save the selection's
+        marker text into a new notebook (copying referenced attachments)
+        and replace the selection with '### name' + [[link]]."""
+        tr = self.translator.tr
+        if not content.strip():
+            return
+
+        def validator(value):
+            if value in self.store.list_notebooks():
+                return tr("nb_exists")
+            return None
+
+        name = dialogs.ask_input(self, tr, tr("save_as_nb_title"),
+                                 tr("nb_name_label"),
+                                 confirm_text=tr("create"),
+                                 validator=validator)
+        if not name:
+            return
+        self.store.create_notebook(name)
+        src = self.store.attachments_path(self.current_notebook)
+        dst = self.store.attachments_path(name)
+        for fname in referenced_attachments(content):
+            path = os.path.join(src, fname)
+            if os.path.exists(path):
+                try:
+                    shutil.copy2(path, os.path.join(dst, fname))
+                except OSError as e:
+                    print(f"Error copying attachment {fname}: {e}")
+        self.store.save_note_text(name, content)
+
+        cursor = self.editor.textCursor()
+        if cursor.hasSelection():
+            start = cursor.selectionStart()
+            at_line_start = (self.marker_doc.document.findBlock(start)
+                             .position() == start)
+            prefix = "" if at_line_start else "\n"
+            cursor.beginEditBlock()
+            cursor.insertText(f"{prefix}### {name}\n[[{name}]]\n",
+                              QTextCharFormat())
+            cursor.endEditBlock()
+        self._refresh_sidebar()
+
+    def open_notebook_link(self, name):
+        """v1 _navigate_to_notebook (L5919): [[name]] switches; missing
+        notebooks alert (same English message as v1)."""
+        if name in self.store.list_notebooks():
+            self.switch_notebook(name)
+        else:
+            tr = self.translator.tr
+            dialogs.show_alert(self, tr, tr("warning"),
+                               f"Notebook '{name}' not found.")
 
     # ── toolbar toggles ──────────────────────────────────────────────
 
@@ -889,12 +1012,15 @@ class MainWindow(QMainWindow):
 
     def _on_content_changed(self):
         # contentsChanged also fires for format-only passes (highlighter
-        # work); only real edits flip the document's modified flag.
-        if self._loading or not self.marker_doc.document.isModified():
+        # work) and for the URL-preview manager's own ephemeral edits;
+        # only real user edits flip the document's modified flag.
+        if (self._loading or self.url_previews.applying
+                or not self.marker_doc.document.isModified()):
             return
         self._dirty = True
         self._autosave_timer.start()
         self._wc_timer.start()
+        self.url_previews.schedule()  # debounced re-scan for URL previews
 
     def save_notes(self, quick=False):
         """Serialize → NoteStore.save_note_text; full saves also snapshot
