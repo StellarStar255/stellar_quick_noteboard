@@ -53,7 +53,10 @@ MAX_IMAGE_WIDTH = 800
 DEFAULT_IMAGE_WIDTH = 400  # v1 max_image_width config default
 
 
-def _placeholder_image(color, size=48):
+PLACEHOLDER_SIZE = 48  # gray box for missing/undecoded attachments
+
+
+def _placeholder_image(color, size=PLACEHOLDER_SIZE):
     img = QImage(size, size, QImage.Format.Format_ARGB32)
     img.fill(QColor(color))
     return img
@@ -207,17 +210,28 @@ class MarkerDocument(QObject):
 
     def _insert_image(self, cursor, name, width):
         """Insert the object char for [IMAGE:name(:width)]. Returns True
-        when a real attachment backs it (placeholder+async or cached)."""
+        when a real attachment backs it (placeholder+async or cached).
+
+        The format ALWAYS gets explicit width/height: an unsized image
+        object renders at the resource's natural pixel size, so the moment
+        the shared resource key is swapped for the real decoded image
+        (another fragment's async decode, register_image, ...) an unsized
+        fragment would blow up far past MAX_IMAGE_WIDTH. When the natural
+        size is unknown (missing file / unreadable header) the placeholder
+        box size keeps today's rendering; _on_image_decoded corrects the
+        geometry once a decode reveals the real size."""
         key = f"attach://{name}"
         fmt = QTextImageFormat()
         fmt.setName(key)
         fmt.setProperty(PROP_INTERNAL_NAME, name)
         fmt.setProperty(PROP_IMAGE_WIDTH, width)
         have_file = self._prepare_resource(key, self.attachment_path(name))
-        if have_file:
+        if key in self._natural_sizes:
             w, h = self.display_size(key, width)
-            fmt.setWidth(w)
-            fmt.setHeight(h)
+        else:
+            w = h = PLACEHOLDER_SIZE  # size unknown: gray/light box
+        fmt.setWidth(w)
+        fmt.setHeight(h)
         cursor.insertImage(fmt)
         return have_file
 
@@ -288,6 +302,10 @@ class MarkerDocument(QObject):
                     _placeholder_image(self.theme["bg_tertiary"], 32))
                 self._loader.request(key, path)
                 return True
+            # Header unreadable (partially-synced file, exotic format):
+            # still try the full decode — _on_image_decoded sizes the
+            # fragments once (if) it succeeds.
+            self._loader.request(key, path)
         # Missing/unreadable attachment: gray placeholder so layout works.
         doc.addResource(QTextDocument.ResourceType.ImageResource,
                         QUrl(key), _placeholder_image("#7d8590"))
@@ -299,8 +317,58 @@ class MarkerDocument(QObject):
         self._natural_sizes[key] = (img.width(), img.height())
         self.document.addResource(QTextDocument.ResourceType.ImageResource,
                                   QUrl(key), img)
+        self._fix_fragment_sizes(key)
         self._refresh_fragments(key)
         self.image_loaded.emit(key.split("://", 1)[1])
+
+    def _fix_fragment_sizes(self, key):
+        """Safety net once the natural size of *key* is known: re-derive
+        every fragment's display geometry and correct any that is unset or
+        wrong (fragment inserted while the file was missing/unreadable, or
+        an aspect ratio the header lied about). Normal fragments already
+        match, so this edits nothing. Corrections join the previous undo
+        step (like URL previews) instead of polluting undo with their own
+        entry, and keep PROP_IMAGE_WIDTH untouched so serialize()
+        round-trips byte-for-byte."""
+        doc = self.document
+        fixes = []  # (position, corrected QTextImageFormat)
+        block = doc.begin()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if frag.isValid():
+                    cf = frag.charFormat()
+                    if (cf.isImageFormat()
+                            and cf.toImageFormat().name() == key
+                            and cf.property(PROP_INTERNAL_NAME) is not None):
+                        old = cf.toImageFormat()
+                        marker_w = int(old.property(PROP_IMAGE_WIDTH) or 0)
+                        w, h = self.display_size(key, marker_w)
+                        if (abs(old.width() - w) >= 1
+                                or abs(old.height() - h) >= 1):
+                            fmt = QTextImageFormat(old)
+                            fmt.setWidth(w)
+                            fmt.setHeight(h)
+                            for pos in range(frag.position(),
+                                             frag.position() + frag.length()):
+                                fixes.append((pos, fmt))
+                it += 1
+            block = block.next()
+        if not fixes:
+            return
+        was_modified = doc.isModified()
+        cursor = QTextCursor(doc)
+        cursor.joinPreviousEditBlock()
+        try:
+            for pos, fmt in fixes:
+                c = QTextCursor(doc)
+                c.setPosition(pos)
+                c.setPosition(pos + 1, QTextCursor.MoveMode.KeepAnchor)
+                c.setCharFormat(fmt)
+        finally:
+            cursor.endEditBlock()
+            doc.setModified(was_modified)
 
     def _refresh_fragments(self, key):
         """Repaint every object fragment using resource *key* (placeholder
