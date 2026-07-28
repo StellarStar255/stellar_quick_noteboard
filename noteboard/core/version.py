@@ -3,7 +3,7 @@
 import re
 import sys
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 GITHUB_REPO = "StellarStar255/stellar_quick_noteboard"
 RELEASES_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"

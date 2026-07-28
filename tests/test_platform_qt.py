@@ -14,6 +14,7 @@ from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication
 
 from noteboard.core import updater
+from noteboard.core.version import APP_VERSION
 from noteboard.core.storage import NoteStore
 from noteboard.core.theme import THEMES
 from noteboard.ui import platform_utils
@@ -309,7 +310,7 @@ def test_update_flow_newer_downloads_and_reaches_ready(
     assert percents == [50, 100]
     assert flow._progress_dlg is None  # progress dialog closed again
     tr = window.translator.tr
-    assert log["asked"] == [tr("update_available").format("99.0.0", "2.0.0")]
+    assert log["asked"] == [tr("update_available").format("99.0.0", APP_VERSION)]
     assert log["alerts"] == [tr("update_ready_msg")]
 
 
@@ -322,7 +323,7 @@ def test_update_flow_up_to_date_alerts_update_none(
         flow.check()
     assert blocker.args == ["none"]
     assert log["alerts"] == [window.translator.tr("update_none")
-                             .format("2.0.0")]
+                             .format(APP_VERSION)]
     assert not log["launched"]
 
 
