@@ -1,0 +1,1 @@
+"""Stellar Quick NoteBoard package."""

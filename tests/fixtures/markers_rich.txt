@@ -1,0 +1,16 @@
+before [STRIKE]struck text[/STRIKE] after
+[STRIKE]multi line strike
+continues here[/STRIKE] done
+[HL:green]green highlight[/HL]
+[HL:yellow]yellow highlight[/HL]
+[HL:red]red highlight[/HL]
+[HL:orange]orange highlight[/HL]
+[HL:purple]purple highlight[/HL]
+[HL:yellow]multi line highlight
+second line[/HL] tail
+[IMAGE:foo.png:300]
+[IMAGE:bar.png]
+[FILE:doc.pdf]
+link to [[笔记本]] notebook
+visit https://example.com/page?a=1 and http://foo.bar/baz
+中文内容测试，混合 English 与标点。

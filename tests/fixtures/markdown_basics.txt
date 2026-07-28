@@ -1,0 +1,30 @@
+# Heading one
+## Heading two
+### Heading three
+plain text line
+- dash list item
+* star list item
++ plus line (not a list in v1 dialect)
+1. numbered item
+2. second numbered item
+- [ ] open task
+- [x] done task
+- [X] done task capital
+> a blockquote line
+>
+```python
+def greet(name):  # comment
+    total = 42
+    return "hello " + name
+```
+```js
+// js comment
+const n = 3.14;
+let s = 'str';
+```
+---
+***
+___
+some **bold** and *italic* and `inline code` here
+**bold spanning `code inside` is skipped in v1**
+`code with **not bold** inside`

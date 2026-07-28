@@ -73,3 +73,6 @@ attachments
 # Packaging build output
 /build/
 /dist/
+
+# Test fixtures must be tracked despite global *.txt/ *.json excludes
+!tests/fixtures/**
