@@ -196,7 +196,6 @@ _I18N = {
     "export_nb":        ("导出笔记本...", "Export Notebook…"),
     "import_nb":        ("导入笔记本...", "Import Notebook…"),
     "export_ok":        ("笔记本已导出到:\n{}", "Notebook exported to:\n{}"),
-    "import_ok":        ("笔记本 '{}' 已导入", "Notebook '{}' imported"),
     "import_err":       ("导入失败: {}", "Import failed: {}"),
     "search_placeholder": ("搜索...", "Search..."),
     "search_n_of_m":    ("{}/{}", "{}/{}"),
@@ -253,7 +252,7 @@ _I18N = {
     "warning":          ("警告", "Warning"),
     "confirm_del":      ("确认删除", "Confirm Delete"),
     "no_rename_def":    ("不能重命名默认笔记本", "Cannot rename the default notebook"),
-    "no_delete_def":    ("不能删除默认笔记本", "Cannot delete the default notebook"),
+    "no_delete_last":   ("不能删除最后一个笔记本", "Cannot delete the last notebook"),
     "nb_exists":        ("笔记本已存在", "Notebook already exists"),
     "confirm_del_msg":  ("确定要删除笔记本 '{}' 吗？\n这将删除所有笔记和附件！",
                          "Delete notebook '{}'?\nAll notes and attachments will be lost!"),
@@ -526,6 +525,13 @@ class NoteApp:
         self.notebooks_dir = "notebooks"
         self.ensure_notebooks_dir()
         self.current_notebook = "默认"  # Will be loaded from config
+        # "默认" may have been deleted by the user — fall back to the first
+        # existing notebook until load_config restores the saved selection.
+        if not os.path.isdir(os.path.join(self.notebooks_dir, self.current_notebook)):
+            existing = sorted(n for n in os.listdir(self.notebooks_dir)
+                              if os.path.isdir(os.path.join(self.notebooks_dir, n)))
+            if existing:
+                self.current_notebook = existing[0]
         self.previous_notebook = None  # 上一个选中的笔记本，用于快速切换
 
         self.note_file = "notes.txt"
@@ -1572,9 +1578,12 @@ class NoteApp:
         """Create notebooks directory if it doesn't exist"""
         if not os.path.exists(self.notebooks_dir):
             os.makedirs(self.notebooks_dir)
-        # Create default notebook if no notebooks exist
-        default_path = os.path.join(self.notebooks_dir, "默认")
-        if not os.path.exists(default_path):
+        # Create the default notebook only when no notebook exists at all —
+        # the user may have deliberately deleted "默认".
+        has_any = any(os.path.isdir(os.path.join(self.notebooks_dir, n))
+                      for n in os.listdir(self.notebooks_dir))
+        if not has_any:
+            default_path = os.path.join(self.notebooks_dir, "默认")
             os.makedirs(default_path)
             # Migrate old data from root directory to default notebook
             self.migrate_old_data(default_path)
@@ -1930,10 +1939,12 @@ class NoteApp:
             self.notebook_listbox.selection_set(iid)
             self.show_notebook_context_menu(event, iid)
         else:
-            # Right-click on empty area — offer to create a new notebook.
+            # Right-click on empty area — offer to create or import a notebook.
             menu = self.make_styled_menu()
             menu.add_command(label=self.tr("new_nb_title"),
                              command=self.create_notebook)
+            menu.add_command(label=self.tr("import_nb"),
+                             command=self.import_notebook)
             try:
                 menu.tk_popup(event.x_root, event.y_root)
             finally:
@@ -2466,8 +2477,10 @@ class NoteApp:
         menu.add_command(label=self.tr("import_nb"), command=self.import_notebook)
         menu.add_separator()
         menu.add_command(label=self.tr("rename_dots"), command=lambda: self.rename_specific_notebook(notebook_name))
-        if notebook_name != "默认":
-            menu.add_command(label=self.tr("delete"), command=lambda: self.delete_specific_notebook(notebook_name))
+        can_delete = self._first_remaining_notebook(exclude=notebook_name) is not None
+        menu.add_command(label=self.tr("delete"),
+                         state=tk.NORMAL if can_delete else tk.DISABLED,
+                         command=lambda: self.delete_specific_notebook(notebook_name))
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -2485,26 +2498,37 @@ class NoteApp:
             self.switch_notebook(notebook_name)
         self.rename_notebook()
 
+    def _first_remaining_notebook(self, exclude=None):
+        """First notebook other than *exclude* — fallback after a delete.
+
+        Returns None when *exclude* is the only notebook left."""
+        for name in self.get_notebooks_list():
+            if name != exclude:
+                return name
+        return None
+
     def delete_specific_notebook(self, notebook_name):
         """Delete a specific notebook"""
         import tkinter.messagebox as messagebox
 
-        if notebook_name == "默认":
-            messagebox.showwarning(self.tr("warning"), self.tr("no_delete_def"))
+        fallback = self._first_remaining_notebook(exclude=notebook_name)
+        if fallback is None:
+            messagebox.showwarning(self.tr("warning"), self.tr("no_delete_last"))
             return
 
         if messagebox.askyesno(self.tr("confirm_del"), self.tr("confirm_del_msg").format(notebook_name)):
             notebook_path = os.path.join(self.notebooks_dir, notebook_name)
-            # If deleting current notebook, switch to default first
-            if notebook_name == self.current_notebook:
-                self.current_notebook = "默认"
+            # If deleting current notebook, move off it before removing files
+            was_current = notebook_name == self.current_notebook
+            if was_current:
+                self.current_notebook = fallback
             # Delete the notebook directory
             shutil.rmtree(notebook_path)
             # Update UI
             self.update_notebook_menu()
             self.refresh_notebook_listbox(self.notebook_search_var.get())
-            if self.current_notebook == "默认":
-                self.switch_notebook("默认")
+            if was_current:
+                self.switch_notebook(fallback)
 
     def update_notebook_menu(self):
         """Update the notebook combobox with current notebooks"""
@@ -2987,9 +3011,10 @@ class NoteApp:
 
     def delete_notebook(self):
         """Delete current notebook"""
-        if self.current_notebook == "默认":
+        fallback = self._first_remaining_notebook(exclude=self.current_notebook)
+        if fallback is None:
             import tkinter.messagebox as messagebox
-            messagebox.showwarning(self.tr("warning"), self.tr("no_delete_def"))
+            messagebox.showwarning(self.tr("warning"), self.tr("no_delete_last"))
             return
 
         t = self.current_theme_colors
@@ -3011,11 +3036,11 @@ class NoteApp:
         def do_delete():
             dialog.destroy()
             notebook_path = self.get_notebook_path()
-            self.current_notebook = "默认"
+            self.current_notebook = fallback
             shutil.rmtree(notebook_path)
             self.update_notebook_menu()
             self.refresh_notebook_listbox(self.notebook_search_var.get())
-            self.switch_notebook("默认")
+            self.switch_notebook(fallback)
 
         ttk.Button(btn_frame, text=self.tr("cancel"), command=dialog.destroy,
                    style="Toolbar.TButton").pack(side=tk.LEFT, padx=10)
@@ -3077,7 +3102,6 @@ class NoteApp:
         if not zip_path:
             return
 
-        t = self.current_theme_colors
         try:
             with zipfile.ZipFile(zip_path, 'r') as zf:
                 names = zf.namelist()
@@ -3117,19 +3141,8 @@ class NoteApp:
 
             self.update_notebook_menu()
             self.refresh_notebook_listbox(self.notebook_search_var.get())
+            # Switching to the imported notebook is feedback enough; no popup.
             self.switch_notebook(nb_name)
-
-            # Confirmation
-            dialog = tk.Toplevel(self.root)
-            dialog.title(self.tr("import_nb"))
-            dialog.geometry("350x90")
-            dialog.transient(self.root)
-            dialog.grab_set()
-            dialog.configure(bg=t["bg"])
-            tk.Label(dialog, text=self.tr("import_ok").format(nb_name),
-                     bg=t["bg"], fg=t["fg"], font=(SYSTEM_FONT, self.ui_font_size)).pack(pady=(15, 5))
-            ttk.Button(dialog, text=self.tr("confirm"), command=dialog.destroy,
-                       style="Toolbar.TButton").pack(pady=5)
 
         except Exception as e:
             import tkinter.messagebox as messagebox
@@ -3614,10 +3627,11 @@ mark.hl-purple { background: #e6d4f7; }
 
                     # 加载当前笔记本（需要在其他配置之前）
                     notebook = config.get("current_notebook", "默认")
-                    if notebook in self.get_notebooks_list():
+                    notebooks = self.get_notebooks_list()
+                    if notebook in notebooks:
                         self.current_notebook = notebook
-                    else:
-                        self.current_notebook = "默认"
+                    elif notebooks:
+                        self.current_notebook = notebooks[0]
 
                     # 同步更新 UI 显示的笔记本名称
                     self.notebook_var.set(self.current_notebook)
