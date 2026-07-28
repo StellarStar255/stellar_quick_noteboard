@@ -177,6 +177,15 @@ class UpdateFlow(QObject):
             self._show_error(e)
             self.finished.emit("failed")
             return
-        self._alert(self._tr("update_ready_msg"))
+        # mac (bundle swap) and Windows (silent Inno) auto-install and
+        # relaunch; Linux hands the .deb to the system installer manually.
+        auto = platform.system() in ("Darwin", "Windows")
+        if auto and platform.system() == "Darwin":
+            auto = platform_utils.macos_bundle_path() is not None
+        self._alert(self._tr("update_auto_msg" if auto
+                             else "update_ready_msg"))
         self.finished.emit("ready")
-        self._window.close()
+        # Really quit — with the tray active, close() would only hide the
+        # window and the installer would wait on the process forever.
+        quit_fn = getattr(self._window, "quit_app", self._window.close)
+        quit_fn()

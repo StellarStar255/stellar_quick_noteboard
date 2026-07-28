@@ -53,6 +53,8 @@ Source: "..\dist\StellarQuickNoteboard\*"; DestDir: "{app}"; \
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
 
+; No skipifsilent: the in-app auto-update runs this installer with
+; /SILENT and relies on this entry to relaunch the app afterwards.
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; \
-    Flags: nowait postinstall skipifsilent
+    Flags: nowait postinstall

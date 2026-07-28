@@ -23,6 +23,9 @@ import html as _html
 import os
 import platform
 import subprocess
+import sys
+import tempfile
+from pathlib import Path
 
 from PySide6.QtCore import QMimeData, QUrl
 from PySide6.QtGui import QDesktopServices, QImage
@@ -143,13 +146,64 @@ def copy_rich_with_strikethrough(plain, html):
 
 
 def launch_installer(path):
-    """Hand a downloaded installer to the OS (v1 _launch_update L4486):
-    Windows os.startfile, macOS ``open``, Linux xdg-open. Raises on
-    failure — the update flow surfaces the error dialog."""
+    """Install a downloaded update as hands-off as the platform allows.
+
+    Windows: Inno Setup silent install — the installer waits for this
+    process to exit (CloseApplications) and relaunches the app from its
+    [Run] entry. macOS: a detached helper waits for this process to die,
+    mounts the dmg, swaps the running .app bundle in place and relaunches
+    it (Sparkle-style; a running bundle must not delete itself). Falls
+    back to just opening the dmg when not running from a bundle (source
+    runs). Linux: hand the .deb to the system installer.
+    Raises on failure — the update flow surfaces the error dialog."""
     system = platform.system()
     if system == "Windows":
-        os.startfile(path)  # noqa: attribute exists on Windows only
+        subprocess.Popen([path, "/SILENT", "/NORESTART"])
     elif system == "Darwin":
-        subprocess.Popen(["open", path])
+        target = macos_bundle_path()
+        if target is not None and path.endswith(".dmg"):
+            _macos_auto_install(path, target)
+        else:
+            subprocess.Popen(["open", path])
     else:
         subprocess.Popen(["xdg-open", path])
+
+
+def macos_bundle_path():
+    """Path of the running .app bundle; None when not bundled."""
+    exe = Path(sys.executable).resolve()
+    for parent in exe.parents:
+        if parent.name.endswith(".app"):
+            return str(parent)
+    return None
+
+
+def macos_swap_script(dmg_path, target, pid):
+    """The bundle-swap helper script (separate fn so tests can inspect)."""
+    return f'''#!/bin/bash
+# Auto-update helper: wait for the app to exit, swap the bundle, relaunch.
+while kill -0 "{pid}" 2>/dev/null; do sleep 0.3; done
+MNT=$(hdiutil attach -nobrowse -noverify "{dmg_path}" | grep -o "/Volumes/.*" | tail -1)
+[ -n "$MNT" ] || exit 1
+APP=$(ls -d "$MNT"/*.app 2>/dev/null | head -1)
+if [ -n "$APP" ]; then
+  OLD="{target}.old.$$"
+  mv "{target}" "$OLD" 2>/dev/null
+  if ditto "$APP" "{target}"; then
+    rm -rf "$OLD"
+  else
+    mv "$OLD" "{target}" 2>/dev/null
+  fi
+fi
+hdiutil detach "$MNT" -quiet
+open -n "{target}"
+rm -f "$0"
+'''
+
+
+def _macos_auto_install(dmg_path, target):
+    fd, script_path = tempfile.mkstemp(prefix="sqn_update_", suffix=".sh")
+    with os.fdopen(fd, "w") as f:
+        f.write(macos_swap_script(dmg_path, target, os.getpid()))
+    os.chmod(script_path, 0o755)
+    subprocess.Popen(["/bin/bash", script_path], start_new_session=True)
