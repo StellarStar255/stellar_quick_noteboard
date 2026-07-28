@@ -13,20 +13,22 @@ import shutil
 from datetime import datetime
 
 from PySide6.QtCore import QThreadPool, QTimer, Qt
-from PySide6.QtGui import (QCursor, QFont, QGuiApplication, QKeySequence,
-                           QShortcut, QTextCharFormat, QTextCursor)
-from PySide6.QtWidgets import (QCheckBox, QDialog, QFileDialog, QLabel,
-                               QMainWindow, QMenu, QPlainTextEdit, QSplitter,
-                               QToolBar, QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtGui import (QCursor, QFont, QGuiApplication, QIcon,
+                           QKeySequence, QShortcut, QTextCharFormat,
+                           QTextCursor)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFileDialog,
+                               QLabel, QMainWindow, QMenu, QPlainTextEdit,
+                               QSplitter, QToolBar, QToolButton, QVBoxLayout,
+                               QWidget)
 
 from noteboard.core import export as export_core
 from noteboard.core.attachments import cleanup_unused, referenced_attachments
 from noteboard.core.fonts import mono_font, system_font
 from noteboard.core.markers import strip_markers
-from noteboard.core.paths import atomic_write_text
+from noteboard.core.paths import atomic_write_text, resource_path
 from noteboard.core.storage import CONFIG_KEYS
 from noteboard.core.theme import THEMES
-from noteboard.core.version import APP_VERSION
+from noteboard.core.version import APP_VERSION, IS_FROZEN
 from noteboard.core.i18n import Translator
 from noteboard.ui import dialogs
 from noteboard.ui.backup_dialog import BackupRestoreDialog
@@ -40,6 +42,7 @@ from noteboard.ui.outline_panel import OutlinePanel
 from noteboard.ui.qss import build_qss
 from noteboard.ui.recycle_box import RecycleBox
 from noteboard.ui.sidebar import Sidebar
+from noteboard.ui.update_dialog import UpdateFlow
 from noteboard.ui.viewer_window import ViewerWindow
 
 _IS_LINUX = platform.system() == "Linux"
@@ -107,6 +110,7 @@ class MainWindow(QMainWindow):
         self._config_timer.timeout.connect(self._save_config)
 
         self._build_ui()
+        self._set_window_icon()
         self._apply_theme(self.theme_name)
         self._apply_config()
         self._load_notebook(self.current_notebook)
@@ -114,6 +118,13 @@ class MainWindow(QMainWindow):
         # restore the outline panel's open state (v1 _outline_restore)
         if self.cfg.get("outline_visible"):
             self.outline.toggle()
+        # silent update check on installed builds only (v1 __main__
+        # root.after(5000, ...) when frozen): errors and "up to date"
+        # are swallowed, only a newer release prompts.
+        self._update_flow = None
+        if IS_FROZEN:
+            QTimer.singleShot(5000,
+                              lambda: self.check_for_updates(silent=True))
 
     # ── UI construction ──────────────────────────────────────────────
 
@@ -260,6 +271,30 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(slot)
         self.toolbar.addWidget(btn)
         return btn
+
+    def _set_window_icon(self):
+        """v1 set_window_icon (L4500): assets/quick_note_board.png via
+        resource_path, so it works both frozen and from source."""
+        icon_path = resource_path("assets", "quick_note_board.png")
+        if not os.path.exists(icon_path):
+            return
+        icon = QIcon(icon_path)
+        if icon.isNull():
+            return
+        self.setWindowIcon(icon)
+        app = QApplication.instance()
+        if app is not None:
+            app.setWindowIcon(icon)
+
+    # ── software update (M7) ─────────────────────────────────────────
+
+    def check_for_updates(self, silent=False):
+        """v1 check_for_updates (L4369): the 检查更新 menu item and the
+        silent startup check, via ui.update_dialog.UpdateFlow."""
+        flow = UpdateFlow(self, self.translator)
+        self._update_flow = flow  # keep alive across the worker hops
+        flow.check(silent=silent)
+        return flow
 
     # ── config apply / persist ───────────────────────────────────────
 
@@ -770,8 +805,8 @@ class MainWindow(QMainWindow):
         menu.addAction(tr("refresh_display"), self._rerender_document)
         menu.addAction(tr("clean_attach"), self.cleanup_orphaned_attachments)
         menu.addSeparator()
-        menu.addAction(  # update check arrives in M7
-            tr("check_update").format(APP_VERSION)).setEnabled(False)
+        menu.addAction(tr("check_update").format(APP_VERSION),
+                       self.check_for_updates)
         menu.exec(QCursor.pos())
 
     def set_icon_size(self, size):

@@ -26,22 +26,41 @@ M5 additions (editing interactions):
 - [[notebook]] links and URLs open on Cmd/Ctrl/Alt+click (L5912, L9377);
 - Tab/Shift+Tab multi-line indent/unindent (handle_tab L7862);
 - cursor jump-over for ephemeral (never-serialized) lines.
+
+M7 additions (platform integration):
+- full v1 image/file object context menus (show_image_menu L8410,
+  show_file_menu L8996): copy link / copy file / copy path / reveal /
+  show original / open / delete, through ui.platform_utils; items that
+  can't apply are grayed out, never hidden;
+- copy: a selected object copies the real file + its [INTERNAL:...]
+  marker (v1 handle_copy L7377); selections containing [STRIKE] copy
+  rich text/html with <s> spans (v1 copy_with_strikethrough_rtf L7423);
+- paste: an exact [INTERNAL:type:name] clipboard text re-inserts the
+  object when the attachment exists in this notebook (v1
+  paste_internal_link L8096), else falls through (file urls → import,
+  otherwise plain text).
 """
 
 import os
 import re
+import shutil
+import tempfile
 
-from PySide6.QtCore import QElapsedTimer, QPoint, QRectF, Qt, QUrl, Signal
+from PySide6.QtCore import (QElapsedTimer, QMimeData, QPoint, QRectF, Qt,
+                            QUrl, Signal)
 from PySide6.QtGui import (QDesktopServices, QImage, QTextCharFormat,
                            QTextCursor)
 from PySide6.QtWidgets import QApplication, QMenu, QTextEdit
 
 from noteboard.core.attachments import generate_video_thumbnail, is_video_file
 from noteboard.core.i18n import Translator
-from noteboard.core.markers import (HL_CLOSE, HL_OPEN_RE, NOTEBOOK_LINK_RE,
-                                    STRIKE_CLOSE, STRIKE_OPEN, TASK_RE,
-                                    URL_RE, strip_markers)
+from noteboard.core.markers import (FILE_RE, HL_CLOSE, HL_OPEN_RE, IMAGE_RE,
+                                    INTERNAL_LINK_RE, MARKER_SPLIT_RE,
+                                    NOTEBOOK_LINK_RE, STRIKE_CLOSE,
+                                    STRIKE_OPEN, TASK_RE, URL_RE,
+                                    strip_markers)
 from noteboard.core.theme import HIGHLIGHT_NAMES
+from noteboard.ui import platform_utils
 from noteboard.ui.editor import attachments_ui
 from noteboard.ui.editor.document import (LINE_SEP, MAX_IMAGE_WIDTH,
                                           MIN_IMAGE_WIDTH, OBJECT_CHAR,
@@ -57,6 +76,11 @@ MOTION_THROTTLE_MS = 50
 # Style-marker tokens as they appear literally in the document text.
 HL_TOKEN_RE = re.compile(r'\[HL:\w+\]|\[/HL\]')
 STRIKE_TOKEN_RE = re.compile(r'\[STRIKE\]|\[/STRIKE\]')
+
+# Private clipboard format carrying the raw selection marker text, so an
+# in-board paste keeps full fidelity while external apps see the stripped
+# plain/html payloads.
+MARKER_MIME = "application/x-stellar-noteboard-markers"
 
 _LINK_MODIFIERS = (Qt.KeyboardModifier.ControlModifier
                    | Qt.KeyboardModifier.MetaModifier
@@ -128,6 +152,18 @@ class NoteTextEdit(QTextEdit):
     def insertFromMimeData(self, source):
         md = self.marker_doc
         if md.attachments_dir:
+            # Our own rich copy: raw marker text round-trips losslessly.
+            if source.hasFormat(MARKER_MIME):
+                data = bytes(source.data(MARKER_MIME)).decode("utf-8")
+                self._insert_marker_text(data)
+                return
+            # Exact [INTERNAL:type:name] clipboard text (v1 _do_paste
+            # L7991): re-insert the object when the attachment exists in
+            # this notebook, else fall through (urls import / plain text).
+            text = source.text().strip() if source.hasText() else ""
+            m = INTERNAL_LINK_RE.match(text)
+            if m and self._paste_internal_link(m.group(1), m.group(2)):
+                return
             # Local files on the clipboard (Finder copy / drag-drop).
             if source.hasUrls():
                 paths = [u.toLocalFile() for u in source.urls()
@@ -205,6 +241,90 @@ class NoteTextEdit(QTextEdit):
         finally:
             cursor.endEditBlock()
         self.setTextCursor(cursor)
+
+    def _attachment_exists(self, name):
+        path = self.marker_doc.attachment_path(name)
+        return bool(path and os.path.exists(path))
+
+    def _paste_internal_link(self, link_type, name):
+        """v1 paste_internal_link (L8096): insert the object for an
+        [INTERNAL:image/file:name] marker when the attachment exists in
+        the current notebook. Returns False to fall through otherwise."""
+        if link_type not in ("image", "file"):
+            return False
+        if not self._attachment_exists(name):
+            return False
+        md = self.marker_doc
+        cursor = self.textCursor()
+        # v1 deselects (tag_remove SEL) rather than replacing the selection.
+        cursor.clearSelection()
+        cursor.beginEditBlock()
+        try:
+            if link_type == "image":
+                md.insert_image_at(cursor, name, with_label=True)
+            else:
+                md.insert_file_at(cursor, name)
+            cursor.insertText("\n", QTextCharFormat())
+        finally:
+            cursor.endEditBlock()
+        self.setTextCursor(cursor)
+        return True
+
+    def _insert_marker_text(self, marker_text):
+        """Insert marker text at the cursor: [IMAGE:]/[FILE:] markers whose
+        attachment exists become objects, everything else stays literal
+        text (the highlighter styles [STRIKE]/[HL:] as usual)."""
+        md = self.marker_doc
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+        try:
+            if cursor.hasSelection():
+                cursor.removeSelectedText()
+            for part in MARKER_SPLIT_RE.split(marker_text):
+                if not part:
+                    continue
+                m = IMAGE_RE.fullmatch(part)
+                if m and self._attachment_exists(m.group(1)):
+                    md.insert_image_at(cursor, m.group(1),
+                                       int(m.group(2) or 0))
+                    continue
+                m = FILE_RE.fullmatch(part)
+                if m and self._attachment_exists(m.group(1)):
+                    md.insert_file_at(cursor, m.group(1))
+                    continue
+                cursor.insertText(part, QTextCharFormat())
+        finally:
+            cursor.endEditBlock()
+        self.setTextCursor(cursor)
+
+    # ── copy (v1 handle_copy / copy_with_strikethrough_rtf) ──────────────
+
+    def createMimeDataFromSelection(self):
+        """v1 handle_copy (L7280-7415): a selected image/file object
+        copies the real file plus its [INTERNAL:...] marker text; a
+        selection containing [STRIKE] copies rich text/html with <s>
+        spans; anything else keeps the default Qt behavior."""
+        cursor = self.textCursor()
+        if cursor.selectedText() == OBJECT_CHAR:
+            cf = self._object_format_at(cursor.selectionStart())
+            if cf is not None:
+                name = cf.property(PROP_INTERNAL_NAME)
+                kind = "file" if cf.property(PROP_FILE_LINK) else "image"
+                marker = f"[INTERNAL:{kind}:{name}]"
+                path = self.marker_doc.attachment_path(name)
+                if path and os.path.exists(path):
+                    return platform_utils.file_mime_data(path, text=marker)
+                mime = QMimeData()
+                mime.setText(marker)
+                return mime
+        marker_text = self.selection_marker_text()
+        if STRIKE_OPEN in marker_text:
+            mime = QMimeData()
+            mime.setText(strip_markers(marker_text))
+            mime.setHtml(platform_utils.strikethrough_html(marker_text))
+            mime.setData(MARKER_MIME, marker_text.encode("utf-8"))
+            return mime
+        return super().createMimeDataFromSelection()
 
     # ── object hit-testing ───────────────────────────────────────────────
 
@@ -485,20 +605,107 @@ class NoteTextEdit(QTextEdit):
         hit = self._hit_object(event.pos())
         if hit is not None and hit.rect.contains(event.pos().x(),
                                                  event.pos().y()):
-            # Placeholder attachment menu — the full v1 menu set (copy
-            # link/file, reveal, …) arrives with M6. Accepting the event
-            # here is the Qt equivalent of v1's "break" fix: only ONE
-            # menu may show for a click.
+            # Accepting the event here is the Qt equivalent of v1's
+            # "break" fix: only ONE menu may show for a click.
             event.accept()
-            menu = QMenu(self)
-            menu.addAction("Open", lambda: self._open_object(hit))
-            menu.addAction("Copy Path", lambda: self._copy_path(hit))
-            menu.addSeparator()
-            menu.addAction("Delete", lambda: self.delete_object_at(
-                hit.position, hit.is_file))
+            menu = self.build_object_context_menu(hit)
             menu.exec(event.globalPos())
             return
         self._show_text_context_menu(event)
+
+    def build_object_context_menu(self, hit):
+        """v1 show_image_menu (L8410) / show_file_menu (L8996): stable
+        structure — inapplicable items are grayed out, never hidden.
+        Split from exec() so tests can inspect the menu."""
+        tr = self.translator.tr
+        name = hit.name
+        path = self.marker_doc.attachment_path(name)
+        exists = bool(path and os.path.exists(path))
+        kind = "file" if hit.is_file else "image"
+
+        menu = QMenu(self)
+        menu.addAction(
+            tr("copy_link"),
+            lambda: platform_utils.copy_text(f"[INTERNAL:{kind}:{name}]"))
+        menu.addSeparator()
+        if hit.is_file:
+            act = menu.addAction(
+                tr("open_file"),
+                lambda: platform_utils.open_with_default_app(path))
+            act.setEnabled(exists)
+            act = menu.addAction(tr("copy_file"),
+                                 lambda: self._copy_file_object(name))
+            act.setEnabled(exists)
+        else:
+            act = menu.addAction(tr("copy_img_file"),
+                                 lambda: self._copy_file_object(name))
+            act.setEnabled(exists)
+        act = menu.addAction(
+            tr("copy_file_path"),
+            lambda: platform_utils.copy_text(os.path.abspath(path)))
+        act.setEnabled(path is not None)  # standalone editor w/o dir
+        act = menu.addAction(
+            tr("show_in_finder"),
+            lambda: platform_utils.reveal_in_file_manager(path))
+        act.setEnabled(exists)
+        act = menu.addAction(tr("show_original"),
+                             lambda: self._reveal_original(name))
+        act.setEnabled(bool(self._original_path(name)))
+        if not hit.is_file:
+            act = menu.addAction(
+                tr("open_default"),
+                lambda: platform_utils.open_with_default_app(path))
+            act.setEnabled(exists)
+        menu.addSeparator()
+        menu.addAction(tr("delete"), lambda: self.delete_object_at(
+            hit.position, hit.is_file))
+        return menu
+
+    def _copy_file_object(self, name):
+        """v1 copy_file_to_clipboard (L9113): stage a temp copy under the
+        original display name so external pastes keep it, then put the
+        file on the clipboard."""
+        md = self.marker_doc
+        path = md.attachment_path(name)
+        if not path or not os.path.exists(path):
+            return
+        staged = path
+        display = md.display_name(name)
+        try:
+            temp_dir = tempfile.mkdtemp(prefix="sqn_clip_")
+            staged = os.path.join(temp_dir, display)
+            if os.path.isdir(path):
+                shutil.copytree(path, staged)
+            else:
+                shutil.copy2(path, staged)
+        except OSError as e:
+            print(f"Error creating temp copy: {e}")
+            staged = path  # fall back to the internal name
+        platform_utils.copy_file_to_clipboard(staged)
+
+    def _original_path(self, name):
+        """v1 get_original_path (L4569): the pre-paste source path from
+        the filename map; None when unrecorded (pasted screenshots)."""
+        info = self.marker_doc.filename_map.get(name)
+        if isinstance(info, dict):
+            return info.get("path")
+        return None
+
+    def _reveal_original(self, name):
+        """v1 reveal_original_file (L9263): reveal the original source
+        file; when it moved/was deleted, open its folder if that still
+        exists."""
+        original = self._original_path(name)
+        if not original:
+            return
+        if os.path.exists(original):
+            platform_utils.reveal_in_file_manager(original)
+            return
+        folder = os.path.dirname(original)
+        if os.path.isdir(folder):
+            platform_utils.open_with_default_app(folder)
+        else:
+            print(f"Original file no longer exists: {original}")
 
     def _show_text_context_menu(self, event):
         event.accept()
@@ -571,11 +778,6 @@ class NoteTextEdit(QTextEdit):
             return
         name = self.notebook_name_provider()
         QApplication.clipboard().setText(f"[[{name}]]")
-
-    def _copy_path(self, hit):
-        path = self.marker_doc.attachment_path(hit.name)
-        if path:
-            QApplication.clipboard().setText(path)
 
     def delete_object_at(self, position, is_file=False):
         """Remove the object char (undoable). Ephemeral label lines under
