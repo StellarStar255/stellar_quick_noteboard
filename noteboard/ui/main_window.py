@@ -626,10 +626,23 @@ class MainWindow(QMainWindow):
 
     # pins & ordering -------------------------------------------------
 
-    def _on_order_dragged(self, order):
+    def _apply_explicit_order(self, order):
+        """Persist a user-arranged order.
+
+        The sidebar sorts pinned notebooks by their position in the
+        shortcuts list — the saved "order" list cannot override that (v1
+        rule). So an explicit rearrangement must also re-sequence the
+        shortcuts to match, otherwise dragging pinned items snaps back
+        (a bug inherited from v1, fixed here).
+        """
         _old, shortcuts = self.store.load_order()
+        pinned = set(shortcuts)
+        shortcuts = [n for n in order if n in pinned]
         self.store.save_order(order, shortcuts)
         self._refresh_sidebar()
+
+    def _on_order_dragged(self, order):
+        self._apply_explicit_order(order)
 
     def pin_notebook(self, name, pinned):
         order, shortcuts = self.store.load_order()
@@ -642,7 +655,6 @@ class MainWindow(QMainWindow):
 
     def move_notebook(self, name, delta):
         """v1 move_notebook_up/down: swap within the full ordered list."""
-        _old, shortcuts = self.store.load_order()
         order = self.store.ordered_notebooks()
         if name not in order:
             return
@@ -651,16 +663,13 @@ class MainWindow(QMainWindow):
         if not (0 <= target < len(order)):
             return
         order[idx], order[target] = order[target], order[idx]
-        self.store.save_order(order, shortcuts)
-        self._refresh_sidebar()
+        self._apply_explicit_order(order)
 
     def show_order_dialog(self):
         tr = self.translator.tr
         dlg = dialogs.OrderDialog(self, tr, self.store.ordered_notebooks())
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            _old, shortcuts = self.store.load_order()
-            self.store.save_order(dlg.order(), shortcuts)
-            self._refresh_sidebar()
+            self._apply_explicit_order(dlg.order())
 
     # export / import -------------------------------------------------
 
