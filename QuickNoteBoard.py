@@ -2490,7 +2490,7 @@ class NoteApp:
         """Rename a specific notebook"""
         if notebook_name == "默认":
             import tkinter.messagebox as messagebox
-            messagebox.showwarning(self.tr("warning"), self.tr("no_rename_def"))
+            self._show_alert(self.tr("warning"), self.tr("no_rename_def"))
             return
 
         # Switch to this notebook first if not current
@@ -2513,7 +2513,7 @@ class NoteApp:
 
         fallback = self._first_remaining_notebook(exclude=notebook_name)
         if fallback is None:
-            messagebox.showwarning(self.tr("warning"), self.tr("no_delete_last"))
+            self._show_alert(self.tr("warning"), self.tr("no_delete_last"))
             return
 
         if messagebox.askyesno(self.tr("confirm_del"), self.tr("confirm_del_msg").format(notebook_name)):
@@ -2856,6 +2856,56 @@ class NoteApp:
         c = tuple(round(a[i] + (b[i] - a[i]) * ratio) for i in range(3))
         return "#%02x%02x%02x" % c
 
+    def _show_alert(self, title, message, parent=None):
+        """Themed modal alert centered over the main window.
+
+        Replaces the one-way tkinter messageboxes (showinfo/showwarning/
+        showerror), whose native placement ends up at the window edge on
+        macOS instead of centered. Blocks until dismissed, like messagebox.
+        """
+        t = self.current_theme_colors
+        uf = self.ui_font_size
+        hover_accent = self._blend(t["accent"], "#ffffff", 0.18)
+
+        dialog = tk.Toplevel(parent or self.root)
+        dialog.transient(parent or self.root)
+        dialog.overrideredirect(True)
+        dialog.configure(bg=t["border"])
+        card = tk.Frame(dialog, bg=t["bg_secondary"])
+        card.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+
+        tk.Label(card, text=title, bg=t["bg_secondary"], fg=t["fg"],
+                 font=(SYSTEM_FONT, uf + 1, "bold")).pack(
+            anchor="w", padx=18, pady=(14, 0))
+        tk.Label(card, text=message, bg=t["bg_secondary"], fg=t["fg"],
+                 font=(SYSTEM_FONT, uf), wraplength=380, justify="left").pack(
+            anchor="w", padx=18, pady=(10, 0))
+
+        btns = tk.Frame(card, bg=t["bg_secondary"])
+        btns.pack(fill=tk.X, padx=18, pady=(16, 16))
+        ok = tk.Label(btns, text=self.tr("confirm"), bg=t["accent"], fg="#ffffff",
+                      font=(SYSTEM_FONT, uf, "bold"), cursor="hand2",
+                      padx=18, pady=7)
+        ok.pack(side=tk.RIGHT)
+        ok.bind("<Button-1>", lambda e: dialog.destroy())
+        ok.bind("<Enter>", lambda e: ok.configure(bg=hover_accent))
+        ok.bind("<Leave>", lambda e: ok.configure(bg=t["accent"]))
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
+        dialog.bind("<Return>", lambda e: dialog.destroy())
+
+        # Center over the main window
+        dialog.update_idletasks()
+        w = max(320, dialog.winfo_reqwidth())
+        h = dialog.winfo_reqheight()
+        px, py = self.root.winfo_rootx(), self.root.winfo_rooty()
+        pw, ph = self.root.winfo_width(), self.root.winfo_height()
+        dialog.geometry(f"{w}x{h}+{px + (pw - w) // 2}+{py + max(0, (ph - h) // 2)}")
+        dialog.lift()
+        dialog.attributes("-topmost", True)
+        dialog.grab_set()
+        dialog.focus_set()
+        dialog.wait_window()
+
     def _styled_input_dialog(self, title, label_text, on_submit,
                              initial="", confirm_text=None):
         """A clean, borderless, centered input dialog styled for the theme.
@@ -2973,7 +3023,7 @@ class NoteApp:
                 self.switch_notebook(name)
             elif name in self.get_notebooks_list():
                 import tkinter.messagebox as messagebox
-                messagebox.showwarning(self.tr("warning"), self.tr("nb_exists"), parent=dialog)
+                self._show_alert(self.tr("warning"), self.tr("nb_exists"), parent=dialog)
 
         self._styled_input_dialog(self.tr("new_nb_title"), self.tr("nb_name_label"),
                                   do_create, confirm_text=self.tr("create"))
@@ -2982,14 +3032,14 @@ class NoteApp:
         """Rename current notebook"""
         if self.current_notebook == "默认":
             import tkinter.messagebox as messagebox
-            messagebox.showwarning(self.tr("warning"), self.tr("no_rename_def"))
+            self._show_alert(self.tr("warning"), self.tr("no_rename_def"))
             return
 
         def do_rename(new_name, dialog):
             if new_name and new_name != self.current_notebook:
                 if new_name in self.get_notebooks_list():
                     import tkinter.messagebox as messagebox
-                    messagebox.showwarning(self.tr("warning"), self.tr("nb_exists"), parent=dialog)
+                    self._show_alert(self.tr("warning"), self.tr("nb_exists"), parent=dialog)
                     return
                 old_path = self.get_notebook_path()
                 new_path = os.path.join(self.notebooks_dir, new_name)
@@ -3014,7 +3064,7 @@ class NoteApp:
         fallback = self._first_remaining_notebook(exclude=self.current_notebook)
         if fallback is None:
             import tkinter.messagebox as messagebox
-            messagebox.showwarning(self.tr("warning"), self.tr("no_delete_last"))
+            self._show_alert(self.tr("warning"), self.tr("no_delete_last"))
             return
 
         t = self.current_theme_colors
@@ -3146,8 +3196,7 @@ class NoteApp:
 
         except Exception as e:
             import tkinter.messagebox as messagebox
-            messagebox.showerror(self.tr("warning"), self.tr("import_err").format(str(e)),
-                                 parent=self.root)
+            self._show_alert(self.tr("warning"), self.tr("import_err").format(str(e)))
 
     def _show_export_done(self, out_path):
         """Small themed confirmation dialog after a successful export."""
@@ -3215,7 +3264,7 @@ class NoteApp:
             _atomic_write_text(out_path, md)
             self._show_export_done(out_path)
         except Exception as e:
-            messagebox.showerror(self.tr("warning"), str(e), parent=self.root)
+            self._show_alert(self.tr("warning"), str(e))
 
     def export_notebook_html(self):
         """Export the current notebook as a self-contained .html file with
@@ -3236,7 +3285,7 @@ class NoteApp:
             _atomic_write_text(out_path, self._convert_content_to_html(content))
             self._show_export_done(out_path)
         except Exception as e:
-            messagebox.showerror(self.tr("warning"), str(e), parent=self.root)
+            self._show_alert(self.tr("warning"), str(e))
 
     def _inline_md_to_html(self, s):
         """Convert inline markdown (code, bold, italic, URLs) in an
@@ -3400,9 +3449,9 @@ mark.hl-purple { background: #e6d4f7; }
         except FileNotFoundError:
             files = []
         if not files:
-            messagebox.showinfo(
+            self._show_alert(
                 self.tr("restore_title").format(self.current_notebook),
-                self.tr("no_backups"), parent=self.root)
+                self.tr("no_backups"))
             return
 
         dialog = tk.Toplevel(self.root)
@@ -3492,7 +3541,7 @@ mark.hl-purple { background: #e6d4f7; }
                           "r", encoding="utf-8") as f:
                     content = f.read()
             except Exception as e:
-                messagebox.showerror(self.tr("warning"), str(e), parent=dialog)
+                self._show_alert(self.tr("warning"), str(e), parent=dialog)
                 return
             # Snapshot what we are about to replace: on-disk → backups/,
             # editor state → undo stack (so Cmd+Z reverts the restore).
@@ -3989,10 +4038,9 @@ mark.hl-purple { background: #e6d4f7; }
             return
         self._last_save_error_time = now
         try:
-            messagebox.showerror(
+            self._show_alert(
                 self.tr("warning"),
-                self.tr("save_failed_msg").format(self.current_notebook, error),
-                parent=self.root)
+                self.tr("save_failed_msg").format(self.current_notebook, error))
         except Exception:
             pass
 
@@ -4359,9 +4407,8 @@ mark.hl-purple { background: #e6d4f7; }
         latest = _parse_version(tag) if tag else (0,)
         if latest <= _parse_version(APP_VERSION):
             if not silent:
-                messagebox.showinfo(self.tr("update_title"),
-                                    self.tr("update_none").format(APP_VERSION),
-                                    parent=self.root)
+                self._show_alert(self.tr("update_title"),
+                                 self.tr("update_none").format(APP_VERSION))
             return
         new_ver = tag.lstrip("vV")
         suffix = self._update_asset_suffix()
@@ -4447,8 +4494,7 @@ mark.hl-purple { background: #e6d4f7; }
         except Exception as e:
             self._show_update_error(e)
             return
-        messagebox.showinfo(self.tr("update_title"),
-                            self.tr("update_ready_msg"), parent=self.root)
+        self._show_alert(self.tr("update_title"), self.tr("update_ready_msg"))
         self.on_closing()
 
     def set_window_icon(self):
@@ -5281,7 +5327,7 @@ mark.hl-purple { background: #e6d4f7; }
                 return
             if name in self.get_notebooks_list():
                 import tkinter.messagebox as messagebox
-                messagebox.showwarning(self.tr("warning"), self.tr("nb_exists"), parent=dialog)
+                self._show_alert(self.tr("warning"), self.tr("nb_exists"), parent=dialog)
                 return
 
             # Create notebook directory
@@ -5876,9 +5922,8 @@ mark.hl-purple { background: #e6d4f7; }
         if notebook_name in notebooks:
             self.switch_notebook(notebook_name)
         else:
-            import tkinter.messagebox as messagebox
-            messagebox.showwarning(self.tr("warning"),
-                                   f"Notebook '{notebook_name}' not found.")
+            self._show_alert(self.tr("warning"),
+                             f"Notebook '{notebook_name}' not found.")
 
     def _on_cursor_move(self, event=None):
         """Show raw markers on the cursor line, hide them elsewhere."""
@@ -8374,7 +8419,13 @@ mark.hl-purple { background: #e6d4f7; }
         menu.add_command(label=self.tr("open_default"), command=lambda: self.open_file(filename))
         menu.add_separator()
         menu.add_command(label=self.tr("delete"), command=lambda: self.delete_attachment(filename, "image"))
-        menu.tk_popup(event.x_root, event.y_root)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        # Stop the event from reaching the text widget's own right-click
+        # binding, which would pop the text context menu after this one.
+        return "break"
 
     def get_image_resize_edge(self, event, bbox):
         """Check which edge the mouse is near. Returns 'right', 'top', 'bottom', or None"""
@@ -8954,7 +9005,13 @@ mark.hl-purple { background: #e6d4f7; }
         menu.add_command(label=self.tr("show_original"), command=lambda: self.reveal_original_file(filename))
         menu.add_separator()
         menu.add_command(label=self.tr("delete"), command=lambda: self.delete_attachment(filename, "file"))
-        menu.tk_popup(event.x_root, event.y_root)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        # Stop the event from reaching the text widget's own right-click
+        # binding, which would pop the text context menu after this one.
+        return "break"
 
     def delete_attachment(self, filename, attachment_type):
         """Delete image or file from the note (removes from text area only, file remains in attachments)"""
