@@ -147,6 +147,10 @@ I18N = {
                          "Update check failed: {}\n\nYou can also download manually from the releases page."),
     "update_no_asset":  ("新版本 v{} 暂无适用于当前系统的安装包，\n是否打开发布页手动下载？",
                          "v{} has no installer for this platform yet.\nOpen the releases page to download manually?"),
+    # Menu bar & system tray (v2 additions)
+    "help_menu":        ("帮助", "Help"),
+    "tray_show":        ("显示主窗口", "Show Window"),
+    "tray_quit":        ("退出", "Quit"),
 }
 
 

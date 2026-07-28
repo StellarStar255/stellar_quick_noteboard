@@ -69,7 +69,7 @@ from noteboard.core.markers import (FILE_RE, HL_CLOSE, HL_OPEN_RE, IMAGE_RE,
                                     INTERNAL_LINK_RE, MARKER_SPLIT_RE,
                                     NOTEBOOK_LINK_RE, STRIKE_CLOSE,
                                     STRIKE_OPEN, TASK_RE, URL_RE,
-                                    strip_markers)
+                                    strip_markers, strip_style_markers)
 from noteboard.core.theme import HIGHLIGHT_NAMES
 from noteboard.ui import platform_utils
 from noteboard.ui.editor import attachments_ui
@@ -572,8 +572,8 @@ class NoteTextEdit(QTextEdit):
         cursor = self.cursorForPosition(pos)
         col = cursor.positionInBlock()
         text = cursor.block().text()
-        m = TASK_RE.match(text)
-        if m and len(m.group(1)) <= col <= m.end(3) + 1:
+        span = self._task_box_span(text)
+        if span is not None and span[0] <= col <= span[1]:
             return True
         for regex in (URL_RE, NOTEBOOK_LINK_RE):
             for m in regex.finditer(text):
@@ -701,20 +701,36 @@ class NoteTextEdit(QTextEdit):
                 return True
         return False
 
+    @staticmethod
+    def _task_box_span(text):
+        """(raw_start, raw_end, raw_state_pos, state_char) of a task box,
+        looking through [HL:]/[STRIKE] wrappers — a highlighted task line
+        is still a task line. None when the line is not a task."""
+        stripped, imap = strip_style_markers(text)
+        m = TASK_RE.match(stripped)
+        if not m:
+            return None
+        if not imap:
+            return None
+        indent = len(m.group(1))
+        start = imap[indent] if indent < len(imap) else 0
+        end_idx = min(m.end(3), len(imap) - 1)
+        return (start, imap[end_idx] + 1, imap[m.start(3)], m.group(3))
+
     def _toggle_task_at(self, pos):
         """Toggle a - [ ] / - [x] checkbox when its marker span is clicked
         (v1 _on_task_box_click L5577). One undo step."""
         cursor = self.cursorForPosition(pos)
         block = cursor.block()
         col = cursor.positionInBlock()
-        m = TASK_RE.match(block.text())
-        if not m:
+        span = self._task_box_span(block.text())
+        if span is None:
             return False
-        indent = len(m.group(1))
-        if not (indent <= col <= m.end(3) + 1):  # box span through ']'
+        start, end, state_col, state_char = span
+        if not (start <= col <= end):  # box span through ']'
             return False
-        state_pos = block.position() + m.start(3)
-        new_state = ' ' if m.group(3) in 'xX' else 'x'
+        state_pos = block.position() + state_col
+        new_state = ' ' if state_char in 'xX' else 'x'
         c = QTextCursor(self.document())
         c.setPosition(state_pos)
         c.setPosition(state_pos + 1, QTextCursor.MoveMode.KeepAnchor)

@@ -135,7 +135,19 @@ class MainWindow(QMainWindow):
         self.toolbar = QToolBar(self)
         self.toolbar.setMovable(False)
         self.toolbar.setFloatable(False)
+        # The toolbar is the app's only control surface — it must never be
+        # hidable (macOS offers "Hide Toolbar" on right-click by default,
+        # which would strand the user with no way back).
+        self.toolbar.toggleViewAction().setVisible(False)
+        self.toolbar.toggleViewAction().setEnabled(False)
         self.addToolBar(self.toolbar)
+
+        # Native menu bar: gives 检查更新 a discoverable home (macOS global
+        # menu) independent of the toolbar menus.
+        self._menu_help = self.menuBar().addMenu("")
+        self.act_check_update = self._menu_help.addAction("")
+        self.act_check_update.triggered.connect(
+            lambda: self.check_for_updates(False))
 
         self.chk_pin = QCheckBox(self)
         self.chk_pin.toggled.connect(self._toggle_topmost)
@@ -285,6 +297,50 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.setWindowIcon(icon)
+        self._build_tray(icon)
+
+    def createPopupMenu(self):
+        # QMainWindow's default toolbar context menu could hide the toolbar
+        # with no way to restore it — suppress it entirely.
+        return None
+
+    # ── system tray ──────────────────────────────────────────────────
+
+    def _build_tray(self, icon):
+        from PySide6.QtWidgets import QSystemTrayIcon
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray = None
+            return
+        self.tray = QSystemTrayIcon(icon, self)
+        menu = QMenu(self)
+        self.act_tray_show = menu.addAction("")
+        self.act_tray_show.triggered.connect(self._tray_show_window)
+        self.act_tray_update = menu.addAction("")
+        self.act_tray_update.triggered.connect(
+            lambda: self.check_for_updates(False))
+        menu.addSeparator()
+        self.act_tray_quit = menu.addAction("")
+        self.act_tray_quit.triggered.connect(self.close)
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(self._on_tray_activated)
+        self.tray.show()
+        # The tray is built after _build_ui's retranslate pass — label it now.
+        self.retranslate()
+
+    def _tray_show_window(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _on_tray_activated(self, reason):
+        from PySide6.QtWidgets import QSystemTrayIcon
+        # Plain click toggles the window (macOS delivers only the context
+        # menu, so this mainly serves Windows/Linux).
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            if self.isVisible() and not self.isMinimized():
+                self.hide()
+            else:
+                self._tray_show_window()
 
     # ── software update (M7) ─────────────────────────────────────────
 
@@ -447,6 +503,13 @@ class MainWindow(QMainWindow):
     def retranslate(self):
         """v1 _refresh_all_text: relabel every user-visible string."""
         tr = self.translator.tr
+        self._menu_help.setTitle(tr("help_menu"))
+        self.act_check_update.setText(tr("check_update").format(APP_VERSION))
+        if getattr(self, "tray", None) is not None:
+            self.act_tray_show.setText(tr("tray_show"))
+            self.act_tray_update.setText(tr("check_update").format(APP_VERSION))
+            self.act_tray_quit.setText(tr("tray_quit"))
+            self.tray.setToolTip("Quick Note Board")
         self.chk_pin.setText(tr("pin_top"))
         self.chk_img_name.setText(tr("paste_img_name"))
         self.chk_recycle.setText(tr("recycle_box_cb"))

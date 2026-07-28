@@ -265,3 +265,27 @@ def strip_markers(text):
             continue
         out.append(part)
     return "".join(out)
+
+
+# Only the styling wrappers — [IMAGE:]/[FILE:] become object chars at load,
+# so they are not part of a line's textual structure.
+STYLE_MARKER_RE = re.compile(r"\[STRIKE\]|\[/STRIKE\]|\[HL:\w+\]|\[/HL\]")
+
+
+def strip_style_markers(text):
+    """Remove [STRIKE]/[HL:] wrapper tokens from *text*.
+
+    Returns (stripped, index_map) where index_map[i] is the original index
+    of stripped[i]. Line classification must look through these wrappers —
+    a highlighted heading is still a heading — and callers use the map to
+    project spans computed on the stripped view back onto the raw line."""
+    out = []
+    imap = []
+    pos = 0
+    for m in STYLE_MARKER_RE.finditer(text):
+        out.append(text[pos:m.start()])
+        imap.extend(range(pos, m.start()))
+        pos = m.end()
+    out.append(text[pos:])
+    imap.extend(range(pos, len(text)))
+    return "".join(out), imap

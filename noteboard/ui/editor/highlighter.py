@@ -16,7 +16,8 @@ from PySide6.QtGui import (QColor, QFont, QSyntaxHighlighter, QTextCharFormat)
 from noteboard.core import syntax
 from noteboard.core.markers import (HL_CLOSE, HL_OPEN_RE, MARKER_SPLIT_RE,
                                     STRIKE_CLOSE, STRIKE_OPEN, URL_RE,
-                                    classify_line, inline_spans)
+                                    classify_line, inline_spans,
+                                    strip_style_markers)
 from noteboard.core.fonts import mono_font
 from noteboard.core.theme import HIGHLIGHT_NAMES, blend
 
@@ -125,8 +126,24 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         n = len(text)
         ops = []  # (start, end, fmt) in application order; later wins on merge
 
-        info = classify_line(text, in_fence=fence_id > 0)
+        # Classify through [HL:]/[STRIKE] wrappers: a highlighted heading is
+        # still a heading. Spans computed on the stripped view are projected
+        # back onto raw columns via the index map.
+        if fence_id > 0:
+            stripped, imap = text, None
+            info = classify_line(text, in_fence=True)
+        else:
+            stripped, imap = strip_style_markers(text)
+            info = classify_line(stripped)
         kind = info.kind
+
+        def mp(span):
+            s, e = span
+            if imap is None:
+                return s, e
+            if s >= e or not imap:
+                return 0, 0
+            return imap[s], imap[e - 1] + 1
 
         if kind == "code":
             ops.append((0, n, f["codeblock"]))
@@ -145,29 +162,33 @@ class MarkdownHighlighter(QSyntaxHighlighter):
             ops.append((0, n, f["hr"]))
         else:
             if kind in ("heading1", "heading2", "heading3"):
-                ops.append((info.text_span[0], info.text_span[1], f[kind]))
-                ops.append((info.marker_span[0], info.marker_span[1], marker))
+                ts, te = mp(info.text_span)
+                ms, me = mp(info.marker_span)
+                ops.append((ts, te, f[kind]))
+                ops.append((ms, me, marker))
             elif kind == "quote":
-                ops.append((info.text_span[0], info.text_span[1], f["quote"]))
-                ops.append((info.marker_span[0], info.marker_span[1],
-                            f["quote_marker"]))
+                ts, te = mp(info.text_span)
+                ms, me = mp(info.marker_span)
+                ops.append((ts, te, f["quote"]))
+                ops.append((ms, me, f["quote_marker"]))
             elif kind in ("task", "task_done"):
                 if kind == "task_done":
-                    ops.append((info.text_span[0], info.text_span[1],
-                                f["task_done"]))
-                ops.append((info.marker_span[0], info.marker_span[1],
+                    ts, te = mp(info.text_span)
+                    ops.append((ts, te, f["task_done"]))
+                ms, me = mp(info.marker_span)
+                ops.append((ms, me,
                             f["task_box_done" if info.checked else "task_box"]))
             elif kind == "list":
-                ops.append((info.marker_span[0], info.marker_span[1],
-                            f["list_marker"]))
+                ms, me = mp(info.marker_span)
+                ops.append((ms, me, f["list_marker"]))
 
-            for sp in inline_spans(text):
+            for sp in inline_spans(stripped):
                 span_fmt = f.get(sp.kind)
                 if span_fmt is not None:
-                    ops.append((sp.start, sp.end, span_fmt))
+                    ops.append((*mp((sp.start, sp.end)), span_fmt))
                 if sp.kind != "nb_link":  # [[..]] brackets stay visible in v1
                     for a, b in sp.marker_spans:
-                        ops.append((a, b, marker))
+                        ops.append((*mp((a, b)), marker))
 
         # [STRIKE]/[HL:] spans apply on any line (v1 consumes these markers
         # at load before markdown formatting, so they are fence-agnostic).
