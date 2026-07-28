@@ -49,6 +49,24 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self._build_formats()
         self.rehighlight()
 
+    def rehighlight(self):
+        # A full rehighlight on a document with an attached view relayouts
+        # every block eagerly as its formats land (~1s per 3k lines,
+        # measured); suspending layout during the pass defers that to one
+        # lazy relayout on the next paint (~30ms per 3k lines). Same end
+        # state. (Python-side calls only — Qt's internal delayed initial
+        # rehighlight bypasses this non-virtual slot, which is fine: it
+        # only runs when attaching to an already-populated document.)
+        doc = self.document()
+        if doc is not None and hasattr(doc, "setLayoutEnabled"):
+            doc.setLayoutEnabled(False)
+            try:
+                super().rehighlight()
+            finally:
+                doc.setLayoutEnabled(True)
+        else:  # Qt < 6.4
+            super().rehighlight()
+
     # ── format table ─────────────────────────────────────────────────────
 
     def _build_formats(self):

@@ -26,11 +26,13 @@ M3 image pipeline:
   dropped (with its newline) by serialize().
 """
 
+import math
 import os
 
-from PySide6.QtCore import QObject, QUrl, Signal
-from PySide6.QtGui import (QColor, QImage, QTextCharFormat, QTextCursor,
-                           QTextDocument, QTextFormat, QTextImageFormat)
+from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (QColor, QGuiApplication, QImage, QTextCharFormat,
+                           QTextCursor, QTextDocument, QTextFormat,
+                           QTextImageFormat)
 
 from noteboard.core.attachments import is_video_file
 from noteboard.core.fonts import system_font
@@ -83,11 +85,28 @@ class MarkerDocument(QObject):
         self.ui_font_family = system_font()
 
         # Resource-key ("attach://x" / "attachfile://x") indexed caches.
-        # _loaded_images protects decoded QImages/chips from GC.
+        # _loaded_images protects the installed resource QImages/chips from
+        # GC. For real images the stored/installed image is PRE-SCALED to
+        # the largest display width the key is used at (x devicePixelRatio,
+        # so retina stays crisp) — full 2400px+ decodes would otherwise sit
+        # in memory forever and get rescaled by Qt on paint.
         self._loaded_images = {}
-        self._natural_sizes = {}
+        self._natural_sizes = {}   # key -> full natural (w, h)
+        self._target_widths = {}   # key -> max logical display width seen
         self._loader = attachments_ui.ImageLoader(self)
         self._loader.loaded.connect(self._on_image_decoded)
+        # Decodes finishing close together (initial load of an image-heavy
+        # note) are applied in one batch per event-loop turn: one document
+        # walk + one repaint pass for the lot instead of two walks each.
+        self._decoded_batch = {}   # key -> freshly decoded full QImage
+        self._batch_scheduled = False
+
+    def clear_caches(self):
+        """Drop per-notebook image state (notebook switch / re-render)."""
+        self._loaded_images.clear()
+        self._natural_sizes.clear()
+        self._target_widths.clear()
+        self._decoded_batch.clear()
 
     # ── small helpers ────────────────────────────────────────────────────
 
@@ -203,10 +222,10 @@ class MarkerDocument(QObject):
         """Seed the resource cache with an already-decoded image (used by
         paste so the just-saved bitmap needn't be re-decoded)."""
         key = f"attach://{name}"
-        self._loaded_images[key] = qimage
         self._natural_sizes[key] = (qimage.width(), qimage.height())
-        self.document.addResource(QTextDocument.ResourceType.ImageResource,
-                                  QUrl(key), qimage)
+        self._target_widths[key] = max(self._target_widths.get(key, 0),
+                                       self.display_size(key, 0)[0])
+        self._install_image(key, qimage)
 
     def _insert_image(self, cursor, name, width):
         """Insert the object char for [IMAGE:name(:width)]. Returns True
@@ -233,6 +252,8 @@ class MarkerDocument(QObject):
         fmt.setWidth(w)
         fmt.setHeight(h)
         cursor.insertImage(fmt)
+        if have_file:
+            self._ensure_resource_width(key, w)
         return have_file
 
     def _insert_file(self, cursor, name):
@@ -312,80 +333,131 @@ class MarkerDocument(QObject):
         return False
 
     def _on_image_decoded(self, key, img):
-        """GUI-thread slot: swap the placeholder for the decoded image."""
-        self._loaded_images[key] = img
+        """GUI-thread slot: queue the decoded image; all decodes landing in
+        the same event-loop turn are applied together (_apply_decoded_batch:
+        one document walk + one repaint pass for the whole batch)."""
         self._natural_sizes[key] = (img.width(), img.height())
+        self._decoded_batch[key] = img
+        if not self._batch_scheduled:
+            self._batch_scheduled = True
+            QTimer.singleShot(0, self._apply_decoded_batch)
+
+    def _apply_decoded_batch(self):
+        """Swap placeholders for the decoded images of the current batch.
+
+        One walk collects every fragment referencing a batch key; per
+        fragment the display geometry is re-derived and corrected when
+        unset or wrong (fragment inserted while the file was missing or
+        its header unreadable, or an aspect ratio the header lied about) —
+        normal fragments already match, so nothing is edited. Corrections
+        join the previous undo step (like URL previews) instead of
+        polluting undo with their own entry, and keep PROP_IMAGE_WIDTH
+        untouched so serialize() round-trips byte-for-byte."""
+        self._batch_scheduled = False
+        batch, self._decoded_batch = self._decoded_batch, {}
+        if not batch:
+            return
+        doc = self.document
+        fixes = []   # (position, corrected QTextImageFormat)
+        dirty = []   # (position, length) fragment ranges to repaint
+        block = doc.begin()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if frag.isValid():
+                    cf = frag.charFormat()
+                    if (cf.isImageFormat()
+                            and cf.toImageFormat().name() in batch):
+                        key = cf.toImageFormat().name()
+                        dirty.append((frag.position(), frag.length()))
+                        if cf.property(PROP_INTERNAL_NAME) is not None:
+                            old = cf.toImageFormat()
+                            marker_w = int(old.property(PROP_IMAGE_WIDTH)
+                                           or 0)
+                            w, h = self.display_size(key, marker_w)
+                            self._target_widths[key] = max(
+                                self._target_widths.get(key, 0), w)
+                            if (abs(old.width() - w) >= 1
+                                    or abs(old.height() - h) >= 1):
+                                fmt = QTextImageFormat(old)
+                                fmt.setWidth(w)
+                                fmt.setHeight(h)
+                                for pos in range(frag.position(),
+                                                 frag.position()
+                                                 + frag.length()):
+                                    fixes.append((pos, fmt))
+                it += 1
+            block = block.next()
+
+        for key, img in batch.items():
+            self._install_image(key, img)
+
+        if fixes:
+            was_modified = doc.isModified()
+            cursor = QTextCursor(doc)
+            cursor.joinPreviousEditBlock()
+            try:
+                for pos, fmt in fixes:
+                    c = QTextCursor(doc)
+                    c.setPosition(pos)
+                    c.setPosition(pos + 1, QTextCursor.MoveMode.KeepAnchor)
+                    c.setCharFormat(fmt)
+            finally:
+                cursor.endEditBlock()
+                doc.setModified(was_modified)
+        for pos, length in dirty:
+            doc.markContentsDirty(pos, length)
+        for key in batch:
+            self.image_loaded.emit(key.split("://", 1)[1])
+
+    # ── display-scaled resources ─────────────────────────────────────────
+
+    @staticmethod
+    def _device_ratio():
+        app = QGuiApplication.instance()
+        try:
+            return max(1.0, float(app.devicePixelRatio())) if app else 1.0
+        except AttributeError:  # QCoreApplication in headless tools
+            return 1.0
+
+    def _install_image(self, key, img):
+        """Install *img* as resource for *key*, pre-scaled to the largest
+        display width the key is used at (x devicePixelRatio). Keeps ~13MB
+        full-res screenshots out of memory and off the paint path; the
+        natural size stays in _natural_sizes for display_size math, and
+        the image viewer / open-original paths load from the file."""
+        target_w = self._target_widths.get(key, 0)
+        if target_w > 0:
+            needed = math.ceil(target_w * self._device_ratio())
+            if img.width() > needed:
+                img = img.scaledToWidth(
+                    needed, Qt.TransformationMode.SmoothTransformation)
+                img.setDevicePixelRatio(self._device_ratio())
+        self._loaded_images[key] = img
         self.document.addResource(QTextDocument.ResourceType.ImageResource,
                                   QUrl(key), img)
-        self._fix_fragment_sizes(key)
-        self._refresh_fragments(key)
-        self.image_loaded.emit(key.split("://", 1)[1])
 
-    def _fix_fragment_sizes(self, key):
-        """Safety net once the natural size of *key* is known: re-derive
-        every fragment's display geometry and correct any that is unset or
-        wrong (fragment inserted while the file was missing/unreadable, or
-        an aspect ratio the header lied about). Normal fragments already
-        match, so this edits nothing. Corrections join the previous undo
-        step (like URL previews) instead of polluting undo with their own
-        entry, and keep PROP_IMAGE_WIDTH untouched so serialize()
-        round-trips byte-for-byte."""
-        doc = self.document
-        fixes = []  # (position, corrected QTextImageFormat)
-        block = doc.begin()
-        while block.isValid():
-            it = block.begin()
-            while not it.atEnd():
-                frag = it.fragment()
-                if frag.isValid():
-                    cf = frag.charFormat()
-                    if (cf.isImageFormat()
-                            and cf.toImageFormat().name() == key
-                            and cf.property(PROP_INTERNAL_NAME) is not None):
-                        old = cf.toImageFormat()
-                        marker_w = int(old.property(PROP_IMAGE_WIDTH) or 0)
-                        w, h = self.display_size(key, marker_w)
-                        if (abs(old.width() - w) >= 1
-                                or abs(old.height() - h) >= 1):
-                            fmt = QTextImageFormat(old)
-                            fmt.setWidth(w)
-                            fmt.setHeight(h)
-                            for pos in range(frag.position(),
-                                             frag.position() + frag.length()):
-                                fixes.append((pos, fmt))
-                it += 1
-            block = block.next()
-        if not fixes:
-            return
-        was_modified = doc.isModified()
-        cursor = QTextCursor(doc)
-        cursor.joinPreviousEditBlock()
-        try:
-            for pos, fmt in fixes:
-                c = QTextCursor(doc)
-                c.setPosition(pos)
-                c.setPosition(pos + 1, QTextCursor.MoveMode.KeepAnchor)
-                c.setCharFormat(fmt)
-        finally:
-            cursor.endEditBlock()
-            doc.setModified(was_modified)
-
-    def _refresh_fragments(self, key):
-        """Repaint every object fragment using resource *key* (placeholder
-        swap changes no geometry, so only those ranges are dirtied)."""
-        doc = self.document
-        block = doc.begin()
-        while block.isValid():
-            it = block.begin()
-            while not it.atEnd():
-                frag = it.fragment()
-                if frag.isValid():
-                    cf = frag.charFormat()
-                    if (cf.isImageFormat()
-                            and cf.toImageFormat().name() == key):
-                        doc.markContentsDirty(frag.position(), frag.length())
-                it += 1
-            block = block.next()
+    def _ensure_resource_width(self, key, display_w):
+        """Record that *key* renders at *display_w*; when the installed
+        pre-scaled resource is too small for it (image re-inserted wider,
+        drag-resize growing) queue an async re-decode from disk — the
+        batch apply then installs a rescale at the new target width. The
+        too-small resource keeps painting (slightly soft) meanwhile."""
+        if not key.startswith("attach://"):
+            return  # chips/thumbs render at their fixed size
+        if display_w > self._target_widths.get(key, 0):
+            self._target_widths[key] = display_w
+        img = self._loaded_images.get(key)
+        nat = self._natural_sizes.get(key)
+        if img is None or not nat:
+            return  # decode still in flight; batch apply sizes it
+        needed = min(nat[0], math.ceil(self._target_widths[key]
+                                       * self._device_ratio()))
+        if img.width() < needed:
+            path = self.attachment_path(key.split("://", 1)[1])
+            if path and os.path.exists(path):
+                self._loader.request(key, path)
 
     # ── resize (drag-edge path) ──────────────────────────────────────────
 
@@ -422,6 +494,10 @@ class MarkerDocument(QObject):
             cursor.beginEditBlock()
         cursor.setCharFormat(fmt)
         cursor.endEditBlock()
+        # Growing past the pre-scaled resource: re-decode (async) so the
+        # final image is crisp again; dedup in the loader keeps a drag
+        # from queueing more than one decode at a time.
+        self._ensure_resource_width(key, new_width)
         return True
 
     # ── serialization ────────────────────────────────────────────────────

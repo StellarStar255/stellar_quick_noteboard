@@ -92,6 +92,7 @@ class MainWindow(QMainWindow):
 
         self._dirty = False
         self._loading = False
+        self._wc_cache = (None, 0, 0)  # (doc revision, words, chars)
         self._pool = QThreadPool.globalInstance()
         self.viewers = {}  # notebook name -> ViewerWindow (v1 _notebook_viewers)
 
@@ -494,8 +495,7 @@ class MainWindow(QMainWindow):
         pos = self.editor.textCursor().position()
         text = self.marker_doc.serialize()
         md = self.marker_doc
-        md._loaded_images.clear()
-        md._natural_sizes.clear()
+        md.clear_caches()
         self._loading = True
         try:
             md.load(text)
@@ -558,8 +558,7 @@ class MainWindow(QMainWindow):
         md = self.marker_doc
         md.attachments_dir = store.attachments_path(nb)
         md.filename_map = store.load_filename_map(nb)
-        md._loaded_images.clear()
-        md._natural_sizes.clear()
+        md.clear_caches()
         self._loading = True
         try:
             md.load(store.load_note_text(nb))
@@ -1304,9 +1303,19 @@ class MainWindow(QMainWindow):
             sel = (cursor.selectedText()
                    .replace("\u2029", "\n").replace("\u2028", "\n")
                    .replace("\ufffc", ""))
-        text = sel if sel else strip_markers(self.marker_doc.serialize())
-        words = len(_WC_RE.findall(text))
-        chars = len(text) - text.count("\n")
+        if sel:
+            words = len(_WC_RE.findall(sel))
+            chars = len(sel) - sel.count("\n")
+        else:
+            # serialize() + strip + count over the whole note is the pricey
+            # part of the tick (~25ms on 10k lines); cache it per document
+            # revision so cursor/selection churn doesn't recount.
+            rev = self.marker_doc.document.revision()
+            if rev != self._wc_cache[0]:
+                text = strip_markers(self.marker_doc.serialize())
+                self._wc_cache = (rev, len(_WC_RE.findall(text)),
+                                  len(text) - text.count("\n"))
+            _rev, words, chars = self._wc_cache
         key = "wc_stats_sel" if sel else "wc_stats"
         self.wordcount_label.setText(
             self.translator.tr(key).format(words, chars))
